@@ -1,97 +1,74 @@
-# ============================================================
-# Mean Token Entropy + Logistic Uncertainty on HumanEval
-# Models: LLaMA 3 3B, Qwen2.5-Coder 3B, DeepSeek R1 3B
-# Uses Verifiers for correctness evaluation
-# Produces histograms and scatter plots of uncertainty vs correctness
-# ============================================================
+import os, sys, json, time, math, gc, re, io, signal, random, subprocess
+from contextlib import redirect_stdout, redirect_stderr
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple, Optional
 
-import os
-import time
-import gc
-import random
-from typing import List, Dict, Any, Tuple
-import re
-from getpass import getpass
+def _pip_install(pkgs: List[str]):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + pkgs)
 
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.linear_model import LogisticRegression
-from huggingface_hub import login, whoami
+try:
+    import torch
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    from datasets import load_dataset
+    from sklearn.linear_model import LogisticRegression
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+    from huggingface_hub import login, whoami
+    
+except Exception:
+    _pip_install([
+        "transformers==4.46.2",
+        "accelerate==0.34.2",
+        "sentencepiece",
+        "datasets==2.20.0",
+        "pandas==2.2.2",
+        "pyarrow<20",
+        "scikit-learn",
+        "matplotlib",
+        "huggingface_hub",
+        "tqdm",
+    ])
+    import torch
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    from datasets import load_dataset
+    from sklearn.linear_model import LogisticRegression
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+    from huggingface_hub import login, whoami
 
-# Verifiers imports
-import verifiers as vf
-from datasets import load_dataset
+from tqdm import tqdm
 
 print("torch:", torch.__version__)
 
-# ============================================================
-# Hugging Face Authentication
-# ============================================================
+@dataclass
+class Config:
+    out_dir: str = "uncertainty_runs"
+    max_tasks: int = 50             
+    n_prompts: int = 5              
+    n_val_tasks: int = 10           
+    max_new_tokens: int = 256
 
-print("\n" + "="*60)
-print("HUGGING FACE AUTHENTICATION")
-print("="*60)
-print("You need a Hugging Face token to access gated models like LLaMA.")
-print("Get your token from: https://huggingface.co/settings/tokens")
-print("Make sure you've accepted the LLaMA license at:")
-print("https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct")
-print("="*60)
+    temp_attempt0: float = 0.0
+    top_p_attempt0: float = 1.0
+    temp_regen: float = 0.6
+    top_p_regen: float = 0.92
 
-HF_TOKEN = getpass("Paste your Hugging Face token: ").strip()
+    pfail_threshold: float = 0.50
+    max_attempts: int = 3  
 
-try:
-    login(HF_TOKEN, add_to_git_credential=False)
-    user_info = whoami()
-    print(f"\n✓ Successfully logged in as: {user_info.get('name', 'unknown')}")
-except Exception as e:
-    print(f"\n✗ Authentication failed: {e}")
-    print("Please check your token and try again.")
-    exit(1)
+    seed: int = 42
+    use_cache: bool = True
 
-# ============================================================
-# Configuration
-# ============================================================
+CFG = Config()
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DTYPE = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-print(f"\nUsing device={DEVICE}, dtype={DTYPE}")
-
-# Set environment variables
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["HF_TOKEN"] = HF_TOKEN
-
-# Reproducibility
-random.seed(42)
-np.random.seed(42)
-torch.manual_seed(42)
-
-# Experiment settings
-MAX_TASKS = 50              # Number of HumanEval tasks to evaluate
-N_PROMPTS_MTE = 5          # Number of prompt variants for MTE ensemble
-N_VAL_TASKS = 10           # Tasks for training logistic regression
-MAX_NEW_TOKENS = 256
-GEN_TEMPERATURE = 0.6
-GEN_TOP_P = 0.92
-
-# Models to evaluate
 MODELS = [
-    ("llama", "3B-instruct", "meta-llama/Llama-3.2-3B-Instruct"),
-    ("qwen-coder", "3B-instruct", "Qwen/Qwen2.5-Coder-3B-Instruct"),
+    ("llama", "3B-Instruct", "meta-llama/Llama-3.2-3B-Instruct"),
+    ("qwen-coder", "3B-Instruct", "Qwen/Qwen2.5-Coder-3B-Instruct"),
     ("deepseek", "3B-Instruct", "deepseek-ai/deepseek-coder-1.3b-instruct"),
 ]
 
-print("\n" + "="*60)
-print("MODELS TO EVALUATE")
-print("="*60)
-for family, size, model_id in MODELS:
-    print(f"  • {model_id}")
-print("="*60)
-
-# Prompt templates for BayesPE
 BAYESPE_TEMPLATES = [
     "You are an expert Python developer. Write only the function implementation.\n\n{p}\n# Your solution:\n",
     "Complete the Python function so it passes the tests. No explanations.\n\n{p}\n# Implementation:\n",
@@ -100,66 +77,116 @@ BAYESPE_TEMPLATES = [
     "Write a concise Python implementation that satisfies the specification.\n\n{p}\n# Function:\n",
 ]
 
-# ============================================================
-# Model Loading
-# ============================================================
+HF_TOKEN = os.environ.get("HF_TOKEN", "").strip()
+if not HF_TOKEN:
+    from getpass import getpass
+    HF_TOKEN = getpass("Paste your Hugging Face token: ").strip()
 
-def load_model(model_id: str):
-    """Load tokenizer and model with HF authentication"""
-    print(f"\nLoading model: {model_id}")
-    
-    tok = AutoTokenizer.from_pretrained(
-        model_id,
-        use_fast=True,
-        trust_remote_code=True,
-        token=HF_TOKEN  # Use the authenticated token
-    )
+login(HF_TOKEN, add_to_git_credential=False)
+print("Logged in as:", whoami().get("name", "unknown"))
+os.makedirs(CFG.out_dir, exist_ok=True)
+
+def model_key(family: str, size: str, model_id: str) -> str:
+    safe = model_id.replace("/", "__")
+    return f"{family}__{size}__{safe}"
+
+def jdump(obj, path):
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=2)
+
+def jload(path):
+    with open(path, "r") as f:
+        return json.load(f)
+
+def append_jsonl(path: str, row: Dict[str, Any]):
+    with open(path, "a") as f:
+        f.write(json.dumps(row) + "\n")
+
+def load_jsonl_as_list(path: str) -> List[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+    out = []
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                out.append(json.loads(line))
+    return out
+
+def strip_markdown_fences(text: str) -> str:
+    text = re.sub(r"^```python\s*\n", "", text.strip(), flags=re.MULTILINE)
+    text = re.sub(r"^```\s*\n", "", text.strip(), flags=re.MULTILINE)
+    text = re.sub(r"\n```\s*$", "", text.strip(), flags=re.MULTILINE)
+    return text.strip()
+
+def _run_test_with_timeout(module_src: str, entry_point: str, timeout_seconds: int = 10) -> Tuple[bool, Optional[str]]:
+    """
+    Executes HumanEval prompt+candidate+tests with timeout.
+    Warning: exec is unsafe in general. Run in an isolated environment.
+    """
+    f = io.StringIO()
+    use_timeout = hasattr(signal, "SIGALRM") and os.name != "nt"
+    old_handler = None
+
+    if use_timeout:
+        def timeout_handler(signum, frame):
+            raise TimeoutError(f"Test execution exceeded {timeout_seconds} seconds")
+        try:
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(timeout_seconds)
+        except Exception:
+            use_timeout = False
+
+    try:
+        with redirect_stdout(f), redirect_stderr(f):
+            glb = {}
+            exec(module_src, glb, glb)
+            cand = glb[entry_point]
+            glb["candidate"] = cand
+            glb["check"](cand)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+    finally:
+        if use_timeout and old_handler is not None:
+            try:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+            except Exception:
+                pass
+
+def humaneval_pass(prompt: str, code: str, test_src: str, entry_point: str) -> Tuple[bool, Optional[str]]:
+    code = strip_markdown_fences(code)
+    if not code:
+        return False, "empty_code"
+    try:
+        compile(code, "<candidate>", "exec")
+    except SyntaxError as e:
+        return False, f"syntax_error: {e}"
+    module_src = prompt + "\n" + code + "\n\n" + test_src
+    return _run_test_with_timeout(module_src, entry_point, timeout_seconds=10)
+
+def load_model(model_id: str, hf_token: str):
+    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    tok = AutoTokenizer.from_pretrained(model_id, use_fast=True, trust_remote_code=True, token=hf_token)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=DTYPE,
+        token=hf_token,
+        torch_dtype=dtype,
         device_map="auto",
         trust_remote_code=True,
-        attn_implementation="eager",
-        token=HF_TOKEN  # Use the authenticated token
     )
     model.eval()
     return tok, model
 
-# ============================================================
-# Prompt Construction
-# ============================================================
-
 def build_prompt_for_model(raw_prompt: str, family: str) -> Dict[str, Any]:
-    """Build appropriate prompt format for each model family"""
-    if family in {"llama"}:
-        system = "You are a strict coding assistant. Output only valid Python code for the function, no explanations."
-        user = raw_prompt + "\n\n# Your code below:\n"
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
-        return {"chat": True, "messages": messages}
-    
-    if family in {"qwen-coder", "deepseek-coder"}:
-        text = raw_prompt + "\n# Your code below:\n"
-        return {"chat": False, "text": text}
-    
-    return {"chat": False, "text": raw_prompt + "\n# Your code below:\n"}
-
-def apply_mte_prompt(raw_prompt: str, idx: int) -> str:
-    """Apply one of the BayesPE prompt templates"""
-    tpl = BAYESPE_TEMPLATES[idx % len(BAYESPE_TEMPLATES)]
-    return tpl.format(p=raw_prompt.strip())
-
-# ============================================================
-# Generation with Token Entropy
-# ============================================================
+    system = "You are a strict coding assistant. Output only valid Python code for the function, no explanations."
+    user = raw_prompt + "\n\n# Your code below:\n"
+    return {"chat": True, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
 
 def token_entropies_from_logits_list(scores: List[torch.Tensor]) -> Tuple[List[float], float]:
-    """Compute per-token entropy and mean entropy from logits"""
     H = []
     for step_logits in scores:
         probs = torch.softmax(step_logits[0], dim=-1)
@@ -168,52 +195,30 @@ def token_entropies_from_logits_list(scores: List[torch.Tensor]) -> Tuple[List[f
     return H, (float(np.mean(H)) if H else float("nan"))
 
 @torch.inference_mode()
-def generate_with_entropy(
-    tok,
-    model,
-    raw_prompt: str,
-    family: str,
-    max_new_tokens: int = 256,
-    temperature: float = 0.6,
-    top_p: float = 0.92,
-) -> Dict[str, Any]:
-    """Generate code with per-token entropy tracking"""
+def generate_with_entropy(tok, model, prompt_text: str, family: str,
+                          max_new_tokens: int, temperature: float, top_p: float) -> Dict[str, Any]:
     device = next(model.parameters()).device
-    spec = build_prompt_for_model(raw_prompt, family)
-    
+    spec = build_prompt_for_model(prompt_text, family)
     has_chat_template = getattr(tok, "chat_template", None) not in (None, "")
-    
+
     if spec["chat"] and has_chat_template:
-        input_ids = tok.apply_chat_template(
-            spec["messages"], add_generation_prompt=True, return_tensors="pt"
-        ).to(device)
+        input_ids = tok.apply_chat_template(spec["messages"], add_generation_prompt=True, return_tensors="pt").to(device)
         attention_mask = None
     else:
-        if spec["chat"]:
-            parts = []
-            for msg in spec["messages"]:
-                role = msg["role"]
-                content = msg["content"]
-                if role == "system":
-                    parts.append(f"[SYSTEM] {content}\n")
-                elif role == "user":
-                    parts.append(f"[USER] {content}\n")
-                else:
-                    parts.append(f"[{role.upper()}] {content}\n")
-            text = "".join(parts) + "\n[ASSISTANT]\n"
-        else:
-            text = spec["text"]
-        
+        parts = []
+        for msg in spec["messages"]:
+            parts.append(f"[{msg['role'].upper()}] {msg['content']}\n")
+        text = "".join(parts) + "\n[ASSISTANT]\n"
         enc = tok(text, return_tensors="pt")
         input_ids = enc["input_ids"].to(device)
         attention_mask = enc.get("attention_mask", None)
         if attention_mask is not None:
             attention_mask = attention_mask.to(device)
-    
+
     gen_kwargs = dict(
         input_ids=input_ids,
         max_new_tokens=max_new_tokens,
-        do_sample=True,
+        do_sample=(temperature != 0.0),
         temperature=temperature,
         top_p=top_p,
         return_dict_in_generate=True,
@@ -222,402 +227,345 @@ def generate_with_entropy(
     )
     if attention_mask is not None:
         gen_kwargs["attention_mask"] = attention_mask
-    
+
     out = model.generate(**gen_kwargs)
-    
     gen_ids = out.sequences[0, input_ids.shape[1]:]
     gen_text = tok.decode(gen_ids, skip_special_tokens=True)
-    
+
     H_list, H_mean = token_entropies_from_logits_list(out.scores)
-    
     return {
-        "generated_code": gen_text,
+        "generated_code": strip_markdown_fences(gen_text),
         "mean_token_entropy_nats": H_mean,
         "first5_entropies": H_list[:5],
         "num_steps": len(H_list),
+        "num_chars": len(gen_text),
     }
 
-# ============================================================
-# Verifiers Setup
-# ============================================================
+def apply_mte_prompt(raw_prompt: str, idx: int) -> str:
+    tpl = BAYESPE_TEMPLATES[idx % len(BAYESPE_TEMPLATES)]
+    return tpl.format(p=raw_prompt.strip())
 
-class HumanEvalCodeParser(vf.Parser):
-    """Parser to extract code from model output"""
-    def parse_answer(self, response: str) -> str:
-        # Try to extract last ```python ... ``` block if present
-        code_blocks = re.findall(r"```(?:python)?\n(.*?)```", response, re.DOTALL)
-        if code_blocks:
-            code = code_blocks[-1].strip()
-        else:
-            # Fallback: treat whole response as code
-            code = response.strip()
-        
-        # Basic syntax check
-        try:
-            compile(code, "<candidate>", "exec")
-        except SyntaxError:
-            return ""
-        
-        return code
+@dataclass
+class PfailModel:
+    w1: float
+    w2: float
+    b: float
+    H_mean: float
+    H_std: float
+    V_mean: float
+    V_std: float
 
-def passes_humaneval_tests(prompt, completion, info, parser, **state):
-    """Reward function: 1.0 if all tests pass, else 0.0"""
-    code = parser.parse_answer(completion[-1]["content"] if isinstance(completion, list) else completion)
-    if not code:
-        return 0.0
-    
-    test_src = info["test"]
-    entry_point = info["entry_point"]
-    
-    # Build module: prompt + code + tests
-    module_src = prompt + "\n" + code + "\n\n" + test_src
-    
-    glb = {}
-    try:
-        exec(module_src, glb, glb)
-        candidate_fn = glb[entry_point]
-        glb["candidate"] = candidate_fn
-        glb["check"](candidate_fn)
-        return 1.0
-    except Exception:
-        return 0.0
+def fit_pfail_model(H: np.ndarray, V: np.ndarray, y_fail: np.ndarray) -> PfailModel:
+    H_mean = float(H.mean())
+    H_std  = float(H.std() if H.std() > 1e-8 else 1.0)
+    V_mean = float(V.mean())
+    V_std  = float(V.std() if V.std() > 1e-8 else 1.0)
 
-def create_humaneval_dataset():
-    """Create Verifiers-compatible HumanEval dataset"""
-    raw = load_dataset("openai_humaneval", split="test")
-    
-    def row_to_env_record(row):
-        return {
-            "prompt": row["prompt"],
-            "answer": row["canonical_solution"],
-            "info": {
-                "test": row["test"],
-                "entry_point": row["entry_point"],
-                "task_id": row["task_id"],
-            },
-        }
-    
-    return raw.map(row_to_env_record, remove_columns=raw.column_names)
+    X = np.stack([(H - H_mean)/H_std, (V - V_mean)/V_std], axis=1)
 
-# ============================================================
-# Main Evaluation Loop
-# ============================================================
-
-def evaluate_model(family: str, size: str, model_id: str):
-    """Evaluate a single model and return results"""
-    print(f"\n{'='*60}")
-    print(f"Model: {model_id} [{family} / {size}]")
-    print(f"{'='*60}")
-    
-    # Load model
-    try:
-        t0 = time.time()
-        tok, model = load_model(model_id)
-        print(f"Loaded in {time.time() - t0:.1f}s")
-    except Exception as e:
-        print(f"Failed to load {model_id}: {e}")
-        return None
-    
-    # Load HumanEval
-    heval = load_dataset("openai_humaneval")["test"]
-    subset = [heval[i] for i in range(min(MAX_TASKS, len(heval)))]
-    print(f"Using {len(subset)} HumanEval tasks")
-    
-    # Storage for results
-    per_task_mean_entropies: List[float] = []  # H(x_j)
-    per_task_var_entropies: List[float] = []   # V(x_j)
-    per_task_correctness: List[int] = []       # 1 = correct, 0 = incorrect
-    per_task_codes: List[str] = []             # Generated code for examples
-    per_task_prompts: List[str] = []           # Original prompts for examples
-    
-    # Verifiers parser
-    parser = HumanEvalCodeParser()
-    
-    for idx, item in enumerate(subset):
-        task_id = item["task_id"]
-        raw_prompt = item["prompt"]
-        test_code = item["test"]
-        entry_point = item["entry_point"]
-        
-        per_prompt_codes = []
-        per_prompt_mean_entropies = []
-        
-        print(f"  Task {idx+1}/{len(subset)} - {task_id}", flush=True)
-        
-        # Generate once per prompt template
-        for p_idx in range(N_PROMPTS_MTE):
-            wrapped_prompt = apply_mte_prompt(raw_prompt, p_idx)
-            try:
-                res = generate_with_entropy(
-                    tok,
-                    model,
-                    wrapped_prompt,
-                    family=family,
-                    max_new_tokens=MAX_NEW_TOKENS,
-                    temperature=GEN_TEMPERATURE,
-                    top_p=GEN_TOP_P,
-                )
-            except RuntimeError as e:
-                if "CUDA out of memory" in str(e):
-                    print(f"OOM on {model_id} / {task_id}")
-                    res = {
-                        "generated_code": "",
-                        "mean_token_entropy_nats": 0.0,
-                        "first5_entropies": [],
-                        "num_steps": 0,
-                    }
-                else:
-                    raise
-            
-            per_prompt_codes.append(res["generated_code"])
-            per_prompt_mean_entropies.append(res["mean_token_entropy_nats"])
-        
-        # Test the first generated code for correctness using Verifiers
-        first_code = per_prompt_codes[0]
-        correctness = passes_humaneval_tests(
-            raw_prompt, first_code, 
-            {"test": test_code, "entry_point": entry_point, "task_id": task_id},
-            parser
-        )
-        
-        # Compute H(x) and V(x) for this task
-        H_j = float(np.mean(per_prompt_mean_entropies))
-        V_j = float(np.var(per_prompt_mean_entropies))
-        
-        per_task_mean_entropies.append(H_j)
-        per_task_var_entropies.append(V_j)
-        per_task_correctness.append(int(correctness))
-        per_task_codes.append(first_code)
-        per_task_prompts.append(raw_prompt)
-    
-    # Convert to arrays
-    H_all = np.array(per_task_mean_entropies, dtype=float)
-    V_all = np.array(per_task_var_entropies, dtype=float)
-    y_all = np.array(per_task_correctness, dtype=int)
-    n_tasks = len(y_all)
-    
-    # Train logistic regression on validation subset
-    n_val = min(N_VAL_TASKS, n_tasks)
-    perm = np.arange(n_tasks)
-    np.random.shuffle(perm)
-    val_idx = perm[:n_val]
-    test_idx = perm[n_val:]
-    
-    H_val, V_val, y_val = H_all[val_idx], V_all[val_idx], y_all[val_idx]
-    
-    # Standardize H & V
-    H_mean, H_std = float(H_val.mean()), float(H_val.std() if H_val.std() > 1e-8 else 1.0)
-    V_mean, V_std = float(V_val.mean()), float(V_val.std() if V_val.std() > 1e-8 else 1.0)
-    
-    H_val_std = (H_val - H_mean) / H_std
-    V_val_std = (V_val - V_mean) / V_std
-    X_val = np.stack([H_val_std, V_val_std], axis=1)
-    
-    # Fit logistic regression y ~ H,V (predict failure, so flip labels)
-    y_val_fail = 1 - y_val  # 1 = fail, 0 = success
-    
-    if len(np.unique(y_val_fail)) > 1:
+    if len(np.unique(y_fail)) > 1:
         lr = LogisticRegression()
-        lr.fit(X_val, y_val_fail)
+        lr.fit(X, y_fail)
         w1, w2 = lr.coef_[0]
         b = lr.intercept_[0]
     else:
-        # Degenerate case
-        p = float(y_val_fail.mean()) if y_val_fail.size > 0 else 0.5
+        p = float(y_fail.mean())
         p = min(max(p, 1e-4), 1 - 1e-4)
         w1, w2 = 0.0, 0.0
-        b = np.log(p / (1 - p))
-    
-    print(f"\nLogistic weights: w1={w1:.4f}, w2={w2:.4f}, b={b:.4f}")
-    
-    # Compute uncertainty for all tasks
-    H_all_std = (H_all - H_mean) / H_std
-    V_all_std = (V_all - V_mean) / V_std
-    logits = w1 * H_all_std + w2 * V_all_std + b
-    uncertainty = 1.0 / (1.0 + np.exp(-logits))  # Pfail
-    
-    accuracy = float(y_all.mean())
-    mean_uncertainty = float(uncertainty.mean())
-    
-    print(f"Accuracy: {accuracy:.3f}")
-    print(f"Mean Uncertainty: {mean_uncertainty:.3f}")
-    
-    # Clean up
+        b = float(np.log(p/(1-p)))
+
+    return PfailModel(
+        w1=float(w1), w2=float(w2), b=float(b),
+        H_mean=H_mean, H_std=H_std, V_mean=V_mean, V_std=V_std
+    )
+
+def pfail(pmodel: PfailModel, H: float, V: float) -> float:
+    Hs = (H - pmodel.H_mean) / pmodel.H_std
+    Vs = (V - pmodel.V_mean) / pmodel.V_std
+    logit = pmodel.w1*Hs + pmodel.w2*Vs + pmodel.b
+    return float(1.0 / (1.0 + math.exp(-logit)))
+
+def plot_pfail_hist_and_scatter(df: pd.DataFrame, out_prefix: str):
+    d = df.dropna(subset=["pfail", "passed"]).copy()
+    if len(d) == 0:
+        print("No data to plot for", out_prefix)
+        return
+
+    passed = d["passed"].astype(int).values
+    pf = d["pfail"].astype(float).values
+
+    pf_pass = pf[passed == 1]
+    pf_fail = pf[passed == 0]
+
+    plt.figure(figsize=(10, 6))
+    bins = np.linspace(0.0, 1.0, 25)
+    if len(pf_pass):
+        plt.hist(pf_pass, bins=bins, alpha=0.6, label=f"Correct (n={len(pf_pass)})", edgecolor="black", linewidth=0.5)
+    if len(pf_fail):
+        plt.hist(pf_fail, bins=bins, alpha=0.6, label=f"Incorrect (n={len(pf_fail)})", edgecolor="black", linewidth=0.5)
+    plt.xlabel("Uncertainty Pfail")
+    plt.ylabel("Frequency")
+    plt.title("Pfail distribution (blue=correct, red=incorrect)")
+    plt.legend()
+    plt.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    png1 = out_prefix + "_pfail_hist.png"
+    plt.savefig(png1, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    plt.figure(figsize=(10, 6))
+    jitter = np.random.normal(0, 0.01, size=len(pf))
+    x = np.clip(pf + jitter, 0, 1)
+    colors = ["blue" if p == 1 else "red" for p in passed]
+    plt.scatter(x, passed, alpha=0.6, s=40, edgecolors="black", linewidths=0.4, c=colors)
+    plt.yticks([0, 1], ["Incorrect", "Correct"])
+    plt.ylim(-0.1, 1.1)
+    plt.xlim(-0.02, 1.02)
+    plt.xlabel("Uncertainty Pfail")
+    plt.ylabel("Correctness")
+    plt.title("Pfail vs correctness (jittered x)")
+    plt.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    png2 = out_prefix + "_pfail_scatter.png"
+    plt.savefig(png2, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    print("Saved:", png1)
+    print("Saved:", png2)
+
+def evaluate_one_model(family: str, size: str, model_id: str, dataset: List[Dict[str, Any]]):
+    mk = model_key(family, size, model_id)
+    mdir = os.path.join(CFG.out_dir, mk)
+    os.makedirs(mdir, exist_ok=True)
+
+    weights_path = os.path.join(mdir, "pfail_weights.json")
+    tasklog_path  = os.path.join(mdir, "task_results.jsonl")
+    df_csv_path   = os.path.join(mdir, "results.csv")
+
+    done = {}
+    if CFG.use_cache and os.path.exists(tasklog_path):
+        for r in load_jsonl_as_list(tasklog_path):
+            done[(r["task_id"])] = r
+
+    print("\nLoading model:", model_id)
+    t0 = time.time()
+    tok, model = load_model(model_id, hf_token=HF_TOKEN)
+    print(f"Loaded in {time.time() - t0:.1f}s")
+
+    val_items = dataset[:min(CFG.n_val_tasks, len(dataset))]
+
+    if CFG.use_cache and os.path.exists(weights_path):
+        pmodel = PfailModel(**jload(weights_path))
+        print("Loaded cached Pfail weights from:", weights_path)
+    else:
+        H_list, V_list, yfail_list = [], [], []
+        print("Fitting logistic regression for Pfail on validation set...")
+
+        for item in tqdm(val_items, desc="Validation (attempt0)", unit="task"):
+            task_id = item["task_id"]
+            raw_prompt = item["prompt"]
+            test_src = item["test"]
+            entry_point = item["entry_point"]
+
+            cached = done.get(task_id, None)
+            if cached and cached.get("attempt0") and cached["attempt0"].get("H") is not None:
+                H = float(cached["attempt0"]["H"])
+                V = float(cached["attempt0"]["V"])
+                passed0 = bool(cached["attempt0"]["passed"])
+            else:
+                per_ent = []
+                per_code = []
+                for p_idx in range(CFG.n_prompts):
+                    wrapped = apply_mte_prompt(raw_prompt, p_idx)
+                    res = generate_with_entropy(
+                        tok, model, wrapped, family=family,
+                        max_new_tokens=CFG.max_new_tokens,
+                        temperature=CFG.temp_attempt0, top_p=CFG.top_p_attempt0
+                    )
+                    per_ent.append(float(res["mean_token_entropy_nats"]))
+                    per_code.append(res["generated_code"])
+
+                H = float(np.mean(per_ent))
+                V = float(np.var(per_ent))
+
+                best_idx = int(np.argmin(per_ent))
+                cand_code = per_code[best_idx]
+                ok, _err = humaneval_pass(raw_prompt, cand_code, test_src, entry_point)
+                passed0 = bool(ok)
+
+                if task_id not in done:
+                    done[task_id] = {
+                        "task_id": task_id,
+                        "model_id": model_id,
+                        "family": family,
+                        "size": size,
+                    }
+                done[task_id]["attempt0"] = {
+                    "H": H, "V": V, "passed": passed0,
+                    "selected_variant_idx": best_idx,
+                    "selected_entropy": float(per_ent[best_idx]),
+                }
+
+            H_list.append(H)
+            V_list.append(V)
+            yfail_list.append(0 if passed0 else 1)
+
+        H_arr = np.array(H_list, dtype=float)
+        V_arr = np.array(V_list, dtype=float)
+        y_fail = np.array(yfail_list, dtype=int)
+
+        pmodel = fit_pfail_model(H_arr, V_arr, y_fail)
+        jdump(pmodel.__dict__, weights_path)
+        print("Saved Pfail weights to:", weights_path)
+        print("Weights:", {"w1": pmodel.w1, "w2": pmodel.w2, "b": pmodel.b})
+-
+    rng = np.random.default_rng(CFG.seed)
+    random.seed(CFG.seed)
+    np.random.seed(CFG.seed)
+    torch.manual_seed(CFG.seed)
+
+    for item in tqdm(dataset, desc=f"Self-correcting eval ({model_id.split('/')[-1]})", unit="task"):
+        task_id = item["task_id"]
+        raw_prompt = item["prompt"]
+        test_src = item["test"]
+        entry_point = item["entry_point"]
+
+        if CFG.use_cache and task_id in done and done[task_id].get("final") is not None:
+            continue 
+
+        attempt_records = []
+        final_selected = None
+
+        for attempt in range(CFG.max_attempts):
+            temperature = CFG.temp_attempt0 if attempt == 0 else CFG.temp_regen
+            top_p       = CFG.top_p_attempt0 if attempt == 0 else CFG.top_p_regen
+
+            per_ent = []
+            per_code = []
+            for p_idx in range(CFG.n_prompts):
+                wrapped = apply_mte_prompt(raw_prompt, p_idx)
+                res = generate_with_entropy(
+                    tok, model, wrapped, family=family,
+                    max_new_tokens=CFG.max_new_tokens,
+                    temperature=temperature, top_p=top_p
+                )
+                per_ent.append(float(res["mean_token_entropy_nats"]))
+                per_code.append(res["generated_code"])
+
+            H = float(np.mean(per_ent))
+            V = float(np.var(per_ent))
+            pf = pfail(pmodel, H, V)
+
+            best_idx = int(np.argmin(per_ent))
+            cand_code = per_code[best_idx]
+            ok, err = humaneval_pass(raw_prompt, cand_code, test_src, entry_point)
+
+            attempt_records.append({
+                "attempt": attempt,
+                "temperature": temperature,
+                "top_p": top_p,
+                "H": H,
+                "V": V,
+                "pfail": pf,
+                "passed": bool(ok),
+                "error": err,
+                "selected_variant_idx": best_idx,
+                "selected_entropy": float(per_ent[best_idx]),
+                "code": cand_code,
+            })
+
+            if pf <= CFG.pfail_threshold:
+                final_selected = attempt_records[-1]
+                break
+
+        if final_selected is None:
+            final_selected = sorted(attempt_records, key=lambda r: r["pfail"])[0]
+
+        out_row = {
+            "task_id": task_id,
+            "model_id": model_id,
+            "family": family,
+            "size": size,
+            "pfail_threshold": CFG.pfail_threshold,
+            "max_attempts": CFG.max_attempts,
+            "n_prompts": CFG.n_prompts,
+            "final": {
+                k: final_selected[k] for k in [
+                    "attempt", "H", "V", "pfail", "passed",
+                    "selected_variant_idx", "selected_entropy"
+                ]
+            },
+            "attempts": [
+                {k: a[k] for k in [
+                    "attempt","temperature","top_p","H","V","pfail","passed","selected_variant_idx","selected_entropy"
+                ]}
+                for a in attempt_records
+            ],
+            "final_code": final_selected["code"],
+        }
+
+        append_jsonl(tasklog_path, out_row)
+        done[task_id] = out_row
+
     del model, tok
     torch.cuda.empty_cache()
     gc.collect()
-    
-    return {
-        "family": family,
-        "size": size,
-        "model_id": model_id,
-        "correctness": y_all,
-        "uncertainty": uncertainty,
-        "H": H_all,
-        "V": V_all,
-        "codes": per_task_codes,
-        "prompts": per_task_prompts,
-        "accuracy": accuracy,
-        "mean_uncertainty": mean_uncertainty,
-        "w1": w1,
-        "w2": w2,
-        "b": b,
-    }
 
-# ============================================================
-# Visualization
-# ============================================================
+    records = load_jsonl_as_list(tasklog_path)
+    rows = []
+    for r in records:
+        f = r.get("final", {})
+        rows.append({
+            "task_id": r["task_id"],
+            "model_id": r["model_id"],
+            "family": r["family"],
+            "size": r["size"],
+            "attempt_used": f.get("attempt"),
+            "H": f.get("H"),
+            "V": f.get("V"),
+            "pfail": f.get("pfail"),
+            "passed": f.get("passed"),
+            "selected_variant_idx": f.get("selected_variant_idx"),
+            "selected_entropy": f.get("selected_entropy"),
+        })
+    df = pd.DataFrame(rows)
+    df.to_csv(df_csv_path, index=False)
+    print("Saved:", df_csv_path)
 
-def plot_results(results: Dict[str, Any], save_prefix: str):
-    """Generate histograms and scatter plots"""
-    correctness = results["correctness"]
-    uncertainty = results["uncertainty"]
-    model_name = results["model_id"].split("/")[-1]
-    
-    sns.set(style="whitegrid", font_scale=1.2)
-    
-    # 1. Histogram of Uncertainty
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    correct_mask = correctness == 1
-    incorrect_mask = correctness == 0
-    
-    ax.hist(uncertainty[correct_mask], bins=20, alpha=0.7, color='blue', 
-            label=f'Correct (n={correct_mask.sum()})', edgecolor='black')
-    ax.hist(uncertainty[incorrect_mask], bins=20, alpha=0.7, color='red', 
-            label=f'Incorrect (n={incorrect_mask.sum()})', edgecolor='black')
-    
-    ax.set_xlabel('Uncertainty (Pfail)')
-    ax.set_ylabel('Frequency')
-    ax.set_title(f'Uncertainty Distribution - {model_name}')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(f'{save_prefix}_histogram.png', dpi=300, bbox_inches='tight')
-    plt.show()
-    
-    # 2. Scatter Plot
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Add jitter to x-axis only for visibility (not y-axis)
-    jitter_x = np.random.normal(0, 0.01, size=len(correctness))
-    x_jittered = uncertainty + jitter_x
-    
-    colors = ['blue' if c == 1 else 'red' for c in correctness]
-    ax.scatter(x_jittered, correctness, c=colors, alpha=0.6, s=50, edgecolors='black', linewidth=0.5)
-    
-    ax.set_xlabel('Uncertainty (Pfail)')
-    ax.set_ylabel('Correctness (0=Incorrect, 1=Correct)')
-    ax.set_title(f'Uncertainty vs Correctness - {model_name}')
-    ax.set_ylim(-0.1, 1.1)
-    ax.set_xlim(-0.05, 1.05)
-    ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
-    ax.axhline(y=1, color='gray', linestyle='--', alpha=0.5)
-    ax.grid(True, alpha=0.3)
-    
-    # Add legend
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor='blue', label='Correct'),
-        Patch(facecolor='red', label='Incorrect')
-    ]
-    ax.legend(handles=legend_elements)
-    
-    plt.tight_layout()
-    plt.savefig(f'{save_prefix}_scatter.png', dpi=300, bbox_inches='tight')
-    plt.show()
+    out_prefix = os.path.join(mdir, "plots")
+    plot_pfail_hist_and_scatter(df, out_prefix)
 
-def find_examples(results: Dict[str, Any]):
-    """Find good and bad examples of uncertainty estimation"""
-    correctness = results["correctness"]
-    uncertainty = results["uncertainty"]
-    codes = results["codes"]
-    prompts = results["prompts"]
-    
-    # Good example 1: Correct + Low Uncertainty
-    correct_low_unc_idx = np.where((correctness == 1) & (uncertainty < 0.3))[0]
-    if len(correct_low_unc_idx) > 0:
-        idx = correct_low_unc_idx[np.argmin(uncertainty[correct_low_unc_idx])]
-        print("\n" + "="*60)
-        print("GOOD EXAMPLE 1: Correct Output + Low Uncertainty")
-        print("="*60)
-        print(f"Uncertainty: {uncertainty[idx]:.4f}")
-        print(f"Correctness: {correctness[idx]}")
-        print(f"\nPrompt:\n{prompts[idx][:200]}...")
-        print(f"\nGenerated Code:\n{codes[idx][:300]}...")
-        print("\nWhy this makes sense: The model generated correct code and had low")
-        print("uncertainty across prompt variants, indicating confidence in the solution.")
-    
-    # Good example 2: Incorrect + High Uncertainty
-    incorrect_high_unc_idx = np.where((correctness == 0) & (uncertainty > 0.7))[0]
-    if len(incorrect_high_unc_idx) > 0:
-        idx = incorrect_high_unc_idx[np.argmax(uncertainty[incorrect_high_unc_idx])]
-        print("\n" + "="*60)
-        print("GOOD EXAMPLE 2: Incorrect Output + High Uncertainty")
-        print("="*60)
-        print(f"Uncertainty: {uncertainty[idx]:.4f}")
-        print(f"Correctness: {correctness[idx]}")
-        print(f"\nPrompt:\n{prompts[idx][:200]}...")
-        print(f"\nGenerated Code:\n{codes[idx][:300]}...")
-        print("\nWhy this makes sense: The model struggled with this problem and showed")
-        print("high uncertainty across prompt variants, correctly signaling its uncertainty.")
-    
-    # Failure case: Incorrect + Low Uncertainty (Overconfident)
-    incorrect_low_unc_idx = np.where((correctness == 0) & (uncertainty < 0.3))[0]
-    if len(incorrect_low_unc_idx) > 0:
-        idx = incorrect_low_unc_idx[np.argmin(uncertainty[incorrect_low_unc_idx])]
-        print("\n" + "="*60)
-        print("FAILURE CASE: Incorrect Output + Low Uncertainty (Overconfident)")
-        print("="*60)
-        print(f"Uncertainty: {uncertainty[idx]:.4f}")
-        print(f"Correctness: {correctness[idx]}")
-        print(f"\nPrompt:\n{prompts[idx][:200]}...")
-        print(f"\nGenerated Code:\n{codes[idx][:300]}...")
-        print("\nWhy this failed: The model was overconfident - it generated similar")
-        print("incorrect code across all prompt variants, showing low variance in token")
-        print("entropies. This suggests the model has a systematic misunderstanding of")
-        print("the problem rather than genuine uncertainty.")
+    if df["passed"].notna().any():
+        pr = float(df["passed"].mean())
+        print("Pass rate (final):", pr, f"({int(df['passed'].sum())}/{len(df)})")
+    return df
 
-# ============================================================
-# Run Evaluation
-# ============================================================
+def main():
+    random.seed(CFG.seed)
+    np.random.seed(CFG.seed)
+    torch.manual_seed(CFG.seed)
+
+    heval = load_dataset("openai_humaneval", split="test")
+    total = len(heval)
+    n = min(CFG.max_tasks, total)
+    dataset = [heval[i] for i in range(n)]
+    print(f"HumanEval tasks: using {n}/{total}")
+
+    all_dfs = []
+    for family, size, model_id in MODELS:
+        df = evaluate_one_model(family, size, model_id, dataset)
+        all_dfs.append(df)
+
+    combined = pd.concat(all_dfs, ignore_index=True)
+    combined_path = os.path.join(CFG.out_dir, "combined_results.csv")
+    combined.to_csv(combined_path, index=False)
+    print("Saved:", combined_path)
+
+    print("\nPer-model final pass rates:")
+    for mid in combined["model_id"].unique():
+        md = combined[combined["model_id"] == mid]
+        if len(md):
+            print(mid, "->", float(md["passed"].mean()), f"({int(md['passed'].sum())}/{len(md)})")
 
 if __name__ == "__main__":
-    all_results = []
-    
-    for family, size, model_id in MODELS:
-        results = evaluate_model(family, size, model_id)
-        if results is not None:
-            all_results.append(results)
-            
-            # Generate plots
-            save_prefix = f"{family}_{size}".replace(".", "p")
-            plot_results(results, save_prefix)
-            
-            # Print examples
-            find_examples(results)
-    
-    # Summary statistics
-    print("\n" + "="*60)
-    print("SUMMARY ACROSS ALL MODELS")
-    print("="*60)
-    for r in all_results:
-        print(f"\n{r['model_id']}")
-        print(f"  Accuracy: {r['accuracy']:.3f}")
-        print(f"  Mean Uncertainty: {r['mean_uncertainty']:.3f}")
-        print(f"  Weights: w1={r['w1']:.4f}, w2={r['w2']:.4f}, b={r['b']:.4f}")
-    
-    # Save results
-    summary_df = pd.DataFrame([{
-        "model": r["model_id"],
-        "family": r["family"],
-        "accuracy": r["accuracy"],
-        "mean_uncertainty": r["mean_uncertainty"],
-        "w1": r["w1"],
-        "w2": r["w2"],
-        "b": r["b"],
-    } for r in all_results])
-    
-    summary_df.to_csv("mte_uncertainty_results.csv", index=False)
-    print("\nSaved: mte_uncertainty_results.csv")
+    main()
