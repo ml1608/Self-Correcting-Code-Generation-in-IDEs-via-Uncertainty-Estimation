@@ -1,255 +1,492 @@
-import torch
-import multiprocessing
-import contextlib
-import io
-import gc
-import re
+import os, re, gc, signal
+from contextlib import contextmanager
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
-from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+
 from datasets import load_dataset
-from sentence_transformers import SentenceTransformer, util
-from huggingface_hub import notebook_login
+from sklearn.metrics import roc_auc_score
+from scipy.stats import spearmanr
+
+import torch
+from huggingface_hub import login
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
-if "notebook_login" in locals():
-    print("Checking Hugging Face Login...")
-    notebook_login()
+# 0) HF Auth (needed for gated models like Llama)
 
+if "HF_TOKEN" not in os.environ:
+    raise RuntimeError("Set HF_TOKEN in os.environ (Colab secrets) for gated model access.")
+login(token=os.environ["HF_TOKEN"], add_to_git_credential=False)
 
-MODELS_TO_COMPARE = [
+# 1) CONFIG (tuned for stability)
+
+MODELS = [
     "meta-llama/Llama-3.2-3B-Instruct",
-    "Qwen/Qwen2.5-Coder-3B-Instruct",
-    "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" # Official small R1 variant
+    "Qwen/Qwen2.5-3B-Instruct",
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
 ]
-DATASET_NAME = "openai_humaneval"
-NUM_SAMPLES = 20           
-T_SAMPLES = 10             # Pass@10 (10 generations per problem)
-TIMEOUT_SECONDS = 3        
 
+NUM_EXAMPLES = 100
+K_PASS = 3
+L_SELF = 2
 
+MAX_NEW_TOKENS_CODE = 512
+GEN_TIMEOUT_S = 120
 
-def clean_deepseek_output(text):
-    """Removes <think> tags to extract just the code/answer."""
-    # Remove content between <think> tags
-    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    # Remove stand-alone tags if regex missed them
-    text = text.replace("<think>", "").replace("</think>", "")
-    return text.strip()
+ROLLOUT_TEMP = 0.6
+ROLLOUT_TOP_P = 0.95
 
-def get_code_samples(model_name, model, tokenizer, prompt, device, T=10):
-    model.train()
+SELF_EVAL_TEMP = 0.7
+SELF_EVAL_MAX_NEW_TOKENS = 5
+SELF_EVAL_TIMEOUT_S = 30
 
-    if "Qwen" in model_name or "Llama" in model_name:
-        messages = [
-            {"role": "system", "content": "You are a helpful coding assistant. Complete the python function based on the docstring. Do not explain, just write code."},
-            {"role": "user", "content": prompt}
-        ]
-        try:
-            inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt").to(device)
-        except:
-            inputs = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+# Regeneration experiment params
+TAU = 0.3             # trigger threshold on verifier P(True)
+K_REGEN = 2           # rollouts after regeneration to estimate new P(True)
+REGEN_TEMP = 0.7
+REGEN_TOP_P = 0.9
+REGEN_TIMEOUT_S = 120
 
-    elif "DeepSeek" in model_name:
-        
-        full_prompt = f"<|User|>{prompt}\nPlease complete the Python function. Output only valid Python code.<|Assistant|>"
-        inputs = tokenizer(full_prompt, return_tensors="pt").input_ids.to(device)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
 
-    generated_codes = []
+SYSTEM_PROMPT = (
+    "You are a Python coding assistant. "
+    "Complete the function so that it passes the tests. "
+    "Return only Python code, no explanation."
+)
 
-    with torch.no_grad():
-        for _ in range(T):
-            outputs = model.generate(
-                inputs,
-                max_new_tokens=512, 
-                do_sample=True,
-                temperature=0.7,
-                top_k=50,
-                pad_token_id=tokenizer.eos_token_id,
-                use_cache=True
-            )
-            full_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+# 2) Timeout util 
 
-            
-            if "DeepSeek" in model_name:
-                
-                full_text = clean_deepseek_output(full_text)
+class TimeoutError(Exception):
+    pass
 
-            
-            code = full_text
-            if "```python" in full_text:
-                try: code = full_text.split("```python")[1].split("```")[0]
-                except: pass
-            elif "```" in full_text:
-                try: code = full_text.split("```")[1].split("```")[0]
-                except: pass
-            elif "def " in full_text:
-                
-                code = full_text[full_text.find("def "):]
-
-            
-            code = code.replace("Here is the code:", "").strip()
-            generated_codes.append(code)
-
-    model.eval()
-    return generated_codes
-
-def unsafe_execute(code_str, result_queue):
-    
+@contextmanager
+def time_limit(seconds: int):
+    def handler(signum, frame):
+        raise TimeoutError(f"Timed out after {seconds}s")
+    old = signal.signal(signal.SIGALRM, handler)
+    signal.alarm(seconds)
     try:
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            exec_globals = {}
-            exec(code_str, exec_globals)
-        result_queue.put("passed")
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+# 3) HumanEval dataset
+raw = load_dataset("openai_humaneval", split="test")
+
+# 4) Parser
+def parse_code(text: str) -> str:
+    if text is None:
+        return ""
+    blocks = re.findall(r"```(?:python)?\s*\n(.*?)```", str(text), re.DOTALL | re.IGNORECASE)
+    code = blocks[-1].strip() if blocks else str(text).strip()
+    if "def " in code:
+        code = code[code.find("def "):].strip()
+    try:
+        compile(code, "<candidate>", "exec")
     except Exception:
-        result_queue.put("failed")
-
-def verify_code(prompt, completion, test_case, entry_point):
-    
-    # Construct full executable
-    if completion.strip().startswith("def "):
-        full_code = completion + "\n\n" + test_case + f"\ncheck({entry_point})"
-    else:
-        full_code = prompt + completion + "\n\n" + test_case + f"\ncheck({entry_point})"
-
-    queue = multiprocessing.Queue()
-    p = multiprocessing.Process(target=unsafe_execute, args=(full_code, queue))
-    p.start()
-    p.join(TIMEOUT_SECONDS)
-
-    if p.is_alive():
-        p.terminate()
-        p.join()
-        return 0
-
-    if not queue.empty() and queue.get() == "passed":
-        return 1
-    return 0
-
-def calculate_uncertainty(samples, similarity_model, device):
-    
-    if not samples: return 0.0, ""
-    embeddings = similarity_model.encode(samples, convert_to_tensor=True, device=device)
-    # High threshold for code
-    clusters = util.community_detection(embeddings, min_community_size=1, threshold=0.90)
-
-    if not clusters: return 1.0/len(samples), samples[0]
-
-    largest_cluster = max(clusters, key=len)
-    confidence = len(largest_cluster) / len(samples)
-    best_sample = samples[largest_cluster[0]]
-    return confidence, best_sample
+        return ""
+    return code
 
 
-def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+# 5) Execution verifier (with timeout)
+def passes_humaneval_tests(prompt, completion_text, info, timeout_s: int = 6):
+    code = parse_code(completion_text)
+    if not code:
+        return 0.0
+    module_src = prompt + "\n" + code + "\n\n" + info["test"]
+    glb = {}
+    try:
+        with time_limit(timeout_s):
+            exec(module_src, glb, glb)
+            fn = glb[info["entry_point"]]
+            glb["candidate"] = fn
+            glb["check"](fn)
+        return 1.0
+    except Exception:
+        return 0.0
 
-    print("Loading Similarity Model...")
-    sim_model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
+# 6) Agreement score
+def canonicalize_code(code: str) -> str:
+    if not code:
+        return ""
+    lines = [ln.rstrip() for ln in code.splitlines()]
+    lines = [ln for ln in lines if ln.strip()]
+    return "\n".join(lines).strip()
 
-    print("Loading HumanEval Dataset...")
-    dataset = load_dataset(DATASET_NAME, split="test").select(range(NUM_SAMPLES))
+def agreement_ptrue(codes):
+    canon = [canonicalize_code(c) for c in codes if canonicalize_code(c)]
+    if not canon:
+        return 0.0
+    counts = {}
+    for c in canon:
+        counts[c] = counts.get(c, 0) + 1
+    return max(counts.values()) / len(codes)
 
-    all_results = []
+# 7) Baseline self-eval
+def parse_true_false(text: str):
+    t = (text or "").strip().lower()
+    if t.startswith("true"): return 1
+    if t.startswith("false"): return 0
+    if re.search(r"\btrue\b", t) and not re.search(r"\bfalse\b", t): return 1
+    if re.search(r"\bfalse\b", t) and not re.search(r"\btrue\b", t): return 0
+    return None
 
-    for model_name in MODELS_TO_COMPARE:
-        print(f"\n\n>>> EVALUATING: {model_name} <<<")
+def self_eval_prompt(problem_prompt: str, candidate_code: str):
+    return (
+        "You are a strict evaluator for Python coding tasks.\n"
+        "Answer with exactly one word: True or False.\n\n"
+        "Problem:\n"
+        f"{problem_prompt}\n\n"
+        "Candidate solution:\n"
+        "```python\n"
+        f"{candidate_code}\n"
+        "```\n\n"
+        "Question: Does the candidate solution pass all tests?\n"
+        "Answer:"
+    )
 
-        
-        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
 
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            quantization_config=BitsAndBytesConfig(load_in_4bit=True),
-            device_map="auto",
-            trust_remote_code=True
+# 8) Local generation
+def build_chat_prompt(tokenizer, system, user):
+    if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template is not None:
+        msgs = [{"role":"system","content":system},{"role":"user","content":user}]
+        return tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    return f"[SYSTEM]\n{system}\n\n[USER]\n{user}\n\n[ASSISTANT]\n"
+
+def generate_text(model, tokenizer, system_prompt, user_prompt,
+                  max_new_tokens, temperature=0.0, top_p=1.0):
+    prompt = build_chat_prompt(tokenizer, system_prompt, user_prompt)
+    inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+    with torch.no_grad():
+        out = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=(temperature > 0),
+            temperature=temperature if temperature > 0 else None,
+            top_p=top_p,
+            pad_token_id=tokenizer.eos_token_id,
         )
+    gen = out[0][inputs["input_ids"].shape[-1]:]
+    return tokenizer.decode(gen, skip_special_tokens=True)
 
-        for item in tqdm(dataset, desc=f"Coding with {model_name.split('/')[-1]}"):
-            
-            samples = get_code_samples(model_name, model, tokenizer, item['prompt'], device, T=T_SAMPLES)
-
-            
-            confidence, best_sample = calculate_uncertainty(samples, sim_model, device)
-
-            
-            representative_is_correct = verify_code(item['prompt'], best_sample, item['test'], item['entry_point'])
-
-            all_results.append({
-                "Model": model_name.split("/")[-1],
-                "Task": item['task_id'],
-                "Confidence": confidence,
-                "Correctness": representative_is_correct, # 0 or 1
-                "Code": best_sample,
-                "Prompt": item['prompt']
-            })
-
-        # Free Memory
-        del model, tokenizer
-        gc.collect()
-        torch.cuda.empty_cache()
+def safe_generate(model, tokenizer, system_prompt, user_prompt,
+                  max_new_tokens, temperature=0.0, top_p=1.0,
+                  timeout_s=120):
+    try:
+        with time_limit(timeout_s):
+            return generate_text(
+                model, tokenizer, system_prompt, user_prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p
+            )
+    except Exception:
+        return ""
 
 
-    df = pd.DataFrame(all_results)
-    print("\nGenerating Plots...")
+# 9) Metrics
+def compute_metrics(df: pd.DataFrame, score_col: str):
+    sub = df[["y_correct", score_col]].dropna()
+    y = sub["y_correct"].astype(int).values
+    s = sub[score_col].astype(float).values
 
-    models = df['Model'].unique()
+    auroc = float("nan")
+    if len(np.unique(y)) == 2:
+        try:
+            auroc = roc_auc_score(y, s)
+        except Exception:
+            auroc = float("nan")
 
-    for model in models:
-        model_df = df[df['Model'] == model]
+    rho, pval = float("nan"), float("nan")
+    if len(s) >= 2 and np.std(s) > 0 and len(np.unique(y)) == 2:
+        try:
+            rho, pval = spearmanr(s, y)
+        except Exception:
+            rho, pval = float("nan"), float("nan")
 
-        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    return {
+        "n": int(len(sub)),
+        "pos": int(y.sum()),
+        "neg": int(len(y) - y.sum()),
+        "AUROC": auroc,
+        "Spearman_rho": rho,
+        "Spearman_p": pval,
+    }
 
-        # Plot 1: Histogram
-        # Blue = Correct, Red = Incorrect
-        sns.histplot(data=model_df[model_df['Correctness']==1], x='Confidence', color='blue', label='Correct', kde=False, bins=10, ax=axes[0], alpha=0.6)
-        sns.histplot(data=model_df[model_df['Correctness']==0], x='Confidence', color='red', label='Incorrect', kde=False, bins=10, ax=axes[0], alpha=0.6)
-        axes[0].set_title(f"{model}\nConfidence Distribution")
-        axes[0].set_xlabel("Confidence Score (P(true))")
-        axes[0].set_ylabel("Frequency")
-        axes[0].legend()
+# 10) Failure cases
+def get_failure_cases(df: pd.DataFrame, n=3):
+    # Failure A: overconfidence (baseline failure)
+    fail_overconf = df[(df["y_correct"] == 0) & (df["p_true_self"] >= 0.7)].head(n)
 
-        # Plot 2: Scatter Plot (Confidence vs Correctness)
-        # Add Jitter to see points clearly
-        jitter_y = model_df['Correctness'] + np.random.normal(0, 0.03, size=len(model_df))
-        jitter_x = model_df['Confidence'] + np.random.normal(0, 0.01, size=len(model_df))
+    # Failure B: correct uncertainty (verifier success)
+    fail_low_ver = df[(df["y_correct"] == 0) & (df["p_true_verifier"] <= 0.2)].head(n)
+    return fail_overconf, fail_low_ver
 
-        sc = axes[1].scatter(jitter_x, jitter_y, c=model_df['Correctness'], cmap='coolwarm_r', alpha=0.7, edgecolors='k')
-        axes[1].set_title(f"{model}\nConfidence vs Correctness")
-        axes[1].set_xlabel("Confidence Score")
-        axes[1].set_ylabel("Correctness (0=Fail, 1=Pass)")
-        axes[1].set_yticks([0, 1])
-        axes[1].set_yticklabels(["Incorrect", "Correct"])
+# 11) Regeneration experiment 
+def regenerate_once(model, tokenizer, prompt):
+    # "previous attempt failed" nudge
+    user = prompt + "\n\nThe previous attempt failed. Try a different approach."
+    return safe_generate(
+        model, tokenizer, SYSTEM_PROMPT, user,
+        max_new_tokens=MAX_NEW_TOKENS_CODE,
+        temperature=REGEN_TEMP,
+        top_p=REGEN_TOP_P,
+        timeout_s=REGEN_TIMEOUT_S
+    )
 
+def estimate_ptrue_from_rollouts(model, tokenizer, prompt, info, K: int):
+    flags = []
+    for _ in range(K):
+        txt = safe_generate(
+            model, tokenizer, SYSTEM_PROMPT, prompt,
+            max_new_tokens=MAX_NEW_TOKENS_CODE,
+            temperature=ROLLOUT_TEMP,
+            top_p=ROLLOUT_TOP_P,
+            timeout_s=GEN_TIMEOUT_S
+        )
+        flags.append(int(passes_humaneval_tests(prompt, txt, info, timeout_s=6) == 1.0))
+    return float(np.mean(flags))
+
+# 12) Plots
+def plot_panels(df, score_col, title_prefix, save_path=None):
+    correct = df[df["y_correct"] == 1][score_col].values
+    incorrect = df[df["y_correct"] == 0][score_col].values
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 5), dpi=150)
+
+    bins = np.linspace(
+        min(df[score_col].min(), 0),
+        df[score_col].max(),
+        30
+    )
+
+    axes[0].hist(
+        correct,
+        bins=bins,
+        color="royalblue",
+        alpha=0.7,
+        label=f"Correct (n={len(correct)})"
+    )
+    axes[0].hist(
+        incorrect,
+        bins=bins,
+        color="red",
+        alpha=0.6,
+        label=f"Incorrect (n={len(incorrect)})"
+    )
+
+    axes[0].set_title(f"Histogram of Uncertainty: {title_prefix}", fontsize=12)
+    axes[0].set_xlabel("Uncertainty / Confidence", fontsize=11)
+    axes[0].set_ylabel("Frequency", fontsize=11)
+    axes[0].legend()
+    axes[0].grid(alpha=0.25)
+
+    axes[1].scatter(
+        correct,
+        np.ones_like(correct),
+        color="royalblue",
+        alpha=0.7,
+        label="Correct"
+    )
+    axes[1].scatter(
+        incorrect,
+        np.zeros_like(incorrect),
+        color="red",
+        alpha=0.7,
+        label="Incorrect"
+    )
+
+    axes[1].set_yticks([0, 1])
+    axes[1].set_yticklabels(["Incorrect", "Correct"])
+    axes[1].set_ylim(-0.2, 1.2)
+
+    axes[1].set_title(f"Uncertainty vs Correctness: {title_prefix}", fontsize=12)
+    axes[1].set_xlabel("Uncertainty / Confidence", fontsize=11)
+    axes[1].set_ylabel("Correctness (0 = Incorrect, 1 = Correct)", fontsize=11)
+    axes[1].legend()
+    axes[1].grid(alpha=0.25)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, bbox_inches="tight")
+        print("Saved:", save_path)
+    plt.show()
+
+
+# 13) Main per model
+all_results = []
+summary_rows = []
+
+for model_id in MODELS:
+    print("\n==============================")
+    print("Model:", model_id)
+    print("==============================")
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_id, token=os.environ["HF_TOKEN"], use_fast=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            token=os.environ["HF_TOKEN"],
+            torch_dtype=DTYPE,
+            device_map="auto" if DEVICE == "cuda" else None,
+        )
+        model.eval()
+    except Exception as e:
+        print("LOAD FAILED:", repr(e))
+        continue
+
+    rows = []
+    subset = raw.select(range(NUM_EXAMPLES))
+
+    for i, row in enumerate(subset):
+        prompt = row["prompt"]
+        info = {"test": row["test"], "entry_point": row["entry_point"], "task_id": row["task_id"]}
+
+        # --- Greedy for y_correct ---
+        greedy_text = safe_generate(
+            model, tokenizer, SYSTEM_PROMPT, prompt,
+            max_new_tokens=MAX_NEW_TOKENS_CODE,
+            temperature=0.0, top_p=1.0,
+            timeout_s=GEN_TIMEOUT_S
+        )
+        greedy_code = parse_code(greedy_text)
+        y_correct = int(passes_humaneval_tests(prompt, greedy_text, info, timeout_s=6) == 1.0) if greedy_code else 0
+
+        # --- K rollouts for verifier P(True) ---
+        pass_flags = []
+        rollout_codes = []
+        for _ in range(K_PASS):
+            samp_text = safe_generate(
+                model, tokenizer, SYSTEM_PROMPT, prompt,
+                max_new_tokens=MAX_NEW_TOKENS_CODE,
+                temperature=ROLLOUT_TEMP, top_p=ROLLOUT_TOP_P,
+                timeout_s=GEN_TIMEOUT_S
+            )
+            rollout_codes.append(parse_code(samp_text))
+            pass_flags.append(int(passes_humaneval_tests(prompt, samp_text, info, timeout_s=6) == 1.0))
+
+        p_true_verifier = float(np.mean(pass_flags))
+        p_true_agree = float(agreement_ptrue(rollout_codes))
+
+        # --- Baseline self-eval on greedy code ---
+        if greedy_code:
+            votes = []
+            se_prompt = self_eval_prompt(prompt, greedy_code)
+            for _ in range(L_SELF):
+                se_text = safe_generate(
+                    model, tokenizer, "Answer strictly True or False.", se_prompt,
+                    max_new_tokens=SELF_EVAL_MAX_NEW_TOKENS,
+                    temperature=SELF_EVAL_TEMP, top_p=1.0,
+                    timeout_s=SELF_EVAL_TIMEOUT_S
+                )
+                v = parse_true_false(se_text)
+                votes.append(0 if v is None else v)
+            p_true_self = float(np.mean(votes))
+        else:
+            p_true_self = 0.5
+
+        rows.append({
+            "task_id": info["task_id"],
+            "y_correct": y_correct,
+            "p_true_verifier": p_true_verifier,
+            "p_true_agree": p_true_agree,
+            "p_true_self": p_true_self,
+        })
+
+        if (i + 1) % 5 == 0:
+            print(f"  done {i+1}/{NUM_EXAMPLES}")
+
+    df = pd.DataFrame(rows)
+    safe = model_id.replace("/", "_").replace(":", "_")
+
+    # Save per-model CSV
+    df.to_csv(f"{safe}_ptrue_compare.csv", index=False)
+    print("Saved:", f"{safe}_ptrue_compare.csv")
+
+    # Metrics
+    m_self = compute_metrics(df, "p_true_self")
+    m_ver  = compute_metrics(df, "p_true_verifier")
+    m_ag   = compute_metrics(df, "p_true_agree")
+
+    summary_rows.append({
+        "model": model_id,
+        "pos": m_ver["pos"],
+        "neg": m_ver["neg"],
+        "AUROC_self": m_self["AUROC"],
+        "AUROC_verifier": m_ver["AUROC"],
+        "AUROC_agree": m_ag["AUROC"],
+        "Spearman_self": m_self["Spearman_rho"],
+        "Spearman_verifier": m_ver["Spearman_rho"],
+        "Spearman_agree": m_ag["Spearman_rho"],
+    })
+
+    # Failure cases (top 3)
+    failA, failB = get_failure_cases(df, n=3)
+    print("\nFailure A (incorrect + high baseline confidence):")
+    display(failA)
+    print("\nFailure B (incorrect + low verifier confidence):")
+    display(failB)
+
+    # --- Regeneration experiment ---
+    delta_rows = []
+    for idx, r in df.iterrows():
+        if r["p_true_verifier"] < TAU:
+            prompt = raw[idx]["prompt"]
+            info = {"test": raw[idx]["test"], "entry_point": raw[idx]["entry_point"], "task_id": raw[idx]["task_id"]}
+
+            # regenerate once (new attempt)
+            new_text = regenerate_once(model, tokenizer, prompt)
+
+            # estimate new P(True) with K_REGEN rollouts (cheap but meaningful)
+            new_p = estimate_ptrue_from_rollouts(model, tokenizer, prompt, info, K=K_REGEN)
+
+            delta_rows.append(new_p - r["p_true_verifier"])
+
+    if len(delta_rows) == 0:
+        print("\nNo examples triggered regeneration (all p_true_verifier >= TAU).")
+    else:
+        print("\nMean ΔP(True) after regeneration:", float(np.mean(delta_rows)))
+
+        plt.figure(figsize=(7,4), dpi=150)
+        plt.hist(delta_rows, bins=20, alpha=0.8)
+        plt.axvline(0, color="red", linestyle="--")
+        plt.title(f"{model_id} — Change in P(True) after regeneration")
+        plt.xlabel("ΔP(True)")
+        plt.ylabel("Count")
         plt.tight_layout()
+        plt.savefig(f"{safe}_delta_ptrue.png", bbox_inches="tight")
         plt.show()
 
-        # EXAMPLES ANALYSIS
-        print(f"\n--- Analysis for {model} ---")
+    # Plots
+    plot_panels(df, "p_true_verifier", f"{model_id} — Verifier P(True) (pass@{K_PASS}/{K_PASS})",
+                save_path=f"{safe}_verifier_ptrue.png")
+    plot_panels(df, "p_true_self", f"{model_id} — Baseline Self-eval P(True)",
+                save_path=f"{safe}_self_ptrue.png")
+    plot_panels(df, "p_true_agree", f"{model_id} — Agreement P(True) (mode/K)",
+                save_path=f"{safe}_agree_ptrue.png")
 
-        # Case 1: Correct behavior (High Conf + Correct)
-        success_case = model_df[(model_df['Correctness'] == 1) & (model_df['Confidence'] > 0.8)]
-        if not success_case.empty:
-            row = success_case.iloc[0]
-            print(f"✅ [Good Calibration] The model was confident ({row['Confidence']:.2f}) and Correct.")
-            print(f"   Task: {row['Task']}")
-            print("   Reasoning: All samples were likely identical, and the logic was sound.")
+    all_results.append(df.assign(model=model_id))
 
-        # Case 2: Failure behavior (High Conf + Incorrect)
-        fail_case = model_df[(model_df['Correctness'] == 0) & (model_df['Confidence'] > 0.8)]
-        if not fail_case.empty:
-            row = fail_case.iloc[0]
-            print(f"❌ [Overconfidence Failure] The model was confident ({row['Confidence']:.2f}) but WRONG.")
-            print(f"   Task: {row['Task']}")
-            print("   Reasoning: The model consistently generated the same BUGGY code. This often happens with subtle edge cases.")
-        else:
-            print("   (No severe overconfidence detected in this batch.)")
-        print("-" * 80)
+    # Free RAM between models
+    del model
+    gc.collect()
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
 
-if __name__ == "__main__":
-    main()
+# Save combined CSV + summary
+if all_results:
+    df_all = pd.concat(all_results, ignore_index=True)
+    df_all.to_csv("ALL_MODELS_ptrue_compare.csv", index=False)
+    print("\nSaved: ALL_MODELS_ptrue_compare.csv")
+    display(df_all.head())
+
+    summary = pd.DataFrame(summary_rows)
+    summary.to_csv("SUMMARY_metrics.csv", index=False)
+    print("\nSaved: SUMMARY_metrics.csv")
+    display(summary)
+else:
+    print("\nNo models produced results.")
