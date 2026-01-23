@@ -18,7 +18,7 @@ lookahead_length = 5
 
 @torch.no_grad()
 def greedy_decode(prompt: str, max_new_tokens: int = 256) -> Tuple[str, int, float]:
-    """Baseline: greedy decoding. Returns (text, tokens_generated, latency_seconds)."""
+    
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("cuda")
     output_ids = input_ids.clone()
     start = time.time()
@@ -37,7 +37,7 @@ def greedy_decode(prompt: str, max_new_tokens: int = 256) -> Tuple[str, int, flo
 
 @torch.no_grad()
 def adaptive_decode(prompt: str, max_new_tokens: int = 256) -> Tuple[str, int, float]:
-    """AdaDec: uncertainty-triggered pause-and-rerank. Returns (text, tokens_generated, latency_seconds)."""
+    
     input_ids = tokenizer(prompt, return_tensors='pt').input_ids.to("cuda")
     output_ids = input_ids.clone()
     start_time = time.time()
@@ -68,7 +68,7 @@ def adaptive_decode(prompt: str, max_new_tokens: int = 256) -> Tuple[str, int, f
                     sim_logits = sim_out.logits[:, -1, :]
                     sim_probs = torch.nn.functional.softmax(sim_logits, dim=-1)
 
-                    nxt = torch.argmax(sim_probs, dim=-1)  # greedy lookahead
+                    nxt = torch.argmax(sim_probs, dim=-1)  
                     nxt_prob = sim_probs[0, nxt]
                     score += math.log(float(nxt_prob) + 1e-10)
 
@@ -100,7 +100,7 @@ def adaptive_decode(prompt: str, max_new_tokens: int = 256) -> Tuple[str, int, f
 
 
 def _run_check(check_fn: Callable[[str], bool], completion: str) -> bool:
-    """Runs user-supplied checker. Keep this pure + deterministic."""
+    
     try:
         return bool(check_fn(completion))
     except Exception:
