@@ -148,7 +148,7 @@ def check_is_prime(completion: str) -> bool:
     code = "import math\n" + completion
     g = {}
     l = {}
-    exec(code, g, l)  # <-- for real eval, run in sandboxed process/container
+    exec(code, g, l)  
     if "is_prime" not in l:
         return False
     f = l["is_prime"]
