@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Callable, Tuple
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
-model_name = "Salesforce/codegen-350M-mono"
+model_name = "meta-llama/Llama-3.2-3B-Instruct"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(model_name).to("cuda")
 model.eval()
