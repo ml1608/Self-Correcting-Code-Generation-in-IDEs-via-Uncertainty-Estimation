@@ -1,0 +1,22 @@
+RECOMMENDED THRESHOLDS FOR ADAPTIVE DECODING AND SELF-CORRECTION
+================================================================================
+
+Based on probe prediction distribution:
+  Min:   0.1609
+  Q25:   0.3448
+  Median: 0.4097
+  Q75:   0.4842
+  Max:   0.6561
+
+RECOMMENDED THRESHOLDS:
+  Conservative (25th percentile): 0.345
+  Recommended (median):         0.410
+  Aggressive (75th percentile):   0.484
+
+UPDATE THESE IN YOUR CONFIG FILES:
+--------------------------------------------------------------------------------
+adaptive_decoding_lambda.py (line ~214):
+  use_adaptive = prob_high_entropy > 0.410
+
+self_correction_lambda.py get_config():
+  'uncertainty_threshold': 0.410,
