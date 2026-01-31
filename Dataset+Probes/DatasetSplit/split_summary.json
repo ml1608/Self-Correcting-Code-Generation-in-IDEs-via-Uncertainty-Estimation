@@ -1,0 +1,9 @@
+{
+  "total_tasks": 164,
+  "train_count": 114,
+  "val_count": 25,
+  "test_count": 25,
+  "train_ratio": 0.6951219512195121,
+  "val_ratio": 0.1524390243902439,
+  "test_ratio": 0.1524390243902439
+}

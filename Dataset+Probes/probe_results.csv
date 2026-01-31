@@ -1,0 +1,7 @@
+model_id,model_family,feature_method,classifier,test_accuracy,test_auc,feature_dim,n_train,n_val,n_test,recommended_threshold,probe_path
+Qwen/Qwen2.5-Coder-3B-Instruct,qwen-coder-instruct,SLT,mlp,0.68,0.7628205128205128,6144,114,25,25,0.558199464633337,/lambda/nfs/ALGO-AAPM/PRANAV/Dataset+Probes/saved_probes/Qwen_Qwen2.5-Coder-3B-Instruct_SLT_mlp
+Qwen/Qwen2.5-Coder-3B-Instruct,qwen-coder-instruct,TBG,mlp,0.56,0.6666666666666666,6144,114,25,25,0.39193317008695916,/lambda/nfs/ALGO-AAPM/PRANAV/Dataset+Probes/saved_probes/Qwen_Qwen2.5-Coder-3B-Instruct_TBG_mlp
+deepseek-ai/deepseek-coder-1.3b-instruct,deepseek,SLT,mlp,0.76,0.8782051282051282,6144,114,25,25,0.5002132058178407,/lambda/nfs/ALGO-AAPM/PRANAV/Dataset+Probes/saved_probes/deepseek-ai_deepseek-coder-1.3b-instruct_SLT_mlp
+deepseek-ai/deepseek-coder-1.3b-instruct,deepseek,TBG,mlp,0.64,0.6153846153846154,6144,114,25,25,0.6286093792537888,/lambda/nfs/ALGO-AAPM/PRANAV/Dataset+Probes/saved_probes/deepseek-ai_deepseek-coder-1.3b-instruct_TBG_mlp
+meta-llama/Llama-3.2-3B-Instruct,llama,TBG,mlp,0.68,0.891025641025641,9216,114,25,25,0.7870908613129917,/lambda/nfs/ALGO-AAPM/PRANAV/Dataset+Probes/saved_probes/meta-llama_Llama-3.2-3B-Instruct_TBG_mlp
+meta-llama/Llama-3.2-3B-Instruct,llama,SLT,mlp,0.6,0.75,9216,114,25,25,0.7834728094792375,/lambda/nfs/ALGO-AAPM/PRANAV/Dataset+Probes/saved_probes/meta-llama_Llama-3.2-3B-Instruct_SLT_mlp
