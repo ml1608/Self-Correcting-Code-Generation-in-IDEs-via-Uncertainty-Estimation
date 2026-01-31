@@ -1,0 +1,21 @@
+{
+  "model_id": "Qwen/Qwen2.5-Coder-3B-Instruct",
+  "model_family": "qwen-coder-instruct",
+  "feature_method": "TBG",
+  "classifier": "mlp",
+  "test_accuracy": 0.56,
+  "test_auc": 0.6666666666666666,
+  "feature_dim": 6144,
+  "layers": [
+    -3,
+    -2,
+    -1
+  ],
+  "n_train": 114,
+  "n_val": 25,
+  "n_test": 25,
+  "semantic_entropy_threshold": 0.4206574800700839,
+  "recommended_threshold": 0.39193317008695916,
+  "M_samples": 20,
+  "label_mode": "median"
+}

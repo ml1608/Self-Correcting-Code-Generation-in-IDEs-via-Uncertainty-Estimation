@@ -1,0 +1,10 @@
+feature_method,classifier,test_accuracy,test_auc,feature_dim,n_train,n_val,n_test,recommended_threshold,probe_path
+SLT,deep_nn,0.76,0.717948717948718,9216,114,25,25,0.5976868867874146,saved_probes/SLT_deep_nn
+LAST,mlp,0.76,0.75,9216,114,25,25,0.6770617980991431,saved_probes/LAST_mlp
+SLT,random_forest,0.68,0.717948717948718,9216,114,25,25,0.5503720238095238,saved_probes/SLT_random_forest
+TBG,random_forest,0.68,0.7435897435897436,9216,114,25,25,0.49810119047619045,saved_probes/TBG_random_forest
+SLT,mlp,0.68,0.7115384615384616,9216,114,25,25,0.7774011524749624,saved_probes/SLT_mlp
+TBG,mlp,0.68,0.7948717948717948,9216,114,25,25,0.8644620540214756,saved_probes/TBG_mlp
+LAST,random_forest,0.68,0.7435897435897437,9216,114,25,25,0.5121666666666667,saved_probes/LAST_random_forest
+TBG,deep_nn,0.6,0.6666666666666666,9216,114,25,25,0.4879344552755356,saved_probes/TBG_deep_nn
+LAST,deep_nn,0.6,0.5961538461538461,9216,114,25,25,0.6643372774124146,saved_probes/LAST_deep_nn
