@@ -1,0 +1,13 @@
+transformers==4.46.2
+accelerate==0.34.2
+datasets==2.20.0
+pandas==2.2.2
+pyarrow<20
+tqdm
+scikit-learn
+scipy
+huggingface_hub
+torch
+numpy<2.0
+matplotlib
+
