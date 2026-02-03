@@ -1,0 +1,7 @@
+probe,model,feature_method,best_threshold,best_f1,best_precision,best_recall,best_accuracy,best_trigger_rate_pct,current_recommended
+meta-llama_Llama-3.2-3B-Instruct_SLT_mlp,meta-llama/Llama-3.2-3B-Instruct,SLT,0.5,0.6896551724137931,0.5882352941176471,0.8333333333333334,0.64,68.0,0.7834728094792375
+meta-llama_Llama-3.2-3B-Instruct_TBG_mlp,meta-llama/Llama-3.2-3B-Instruct,TBG,0.7,0.7857142857142857,0.6875,0.9166666666666666,0.76,64.0,0.7870908613129917
+Qwen_Qwen2.5-Coder-3B-Instruct_SLT_mlp,Qwen/Qwen2.5-Coder-3B-Instruct,SLT,0.7,0.9600000000000001,0.9230769230769231,1.0,0.96,52.0,0.558199464633337
+deepseek-ai_deepseek-coder-1.3b-instruct_SLT_mlp,deepseek-ai/deepseek-coder-1.3b-instruct,SLT,0.5,0.9166666666666666,0.9166666666666666,0.9166666666666666,0.92,48.0,0.5002132058178407
+deepseek-ai_deepseek-coder-1.3b-instruct_TBG_mlp,deepseek-ai/deepseek-coder-1.3b-instruct,TBG,0.3,0.7826086956521738,0.8181818181818182,0.75,0.8,44.0,0.6286093792537888
+Qwen_Qwen2.5-Coder-3B-Instruct_TBG_mlp,Qwen/Qwen2.5-Coder-3B-Instruct,TBG,0.3,0.8461538461538461,0.7857142857142857,0.9166666666666666,0.84,56.00000000000001,0.39193317008695916

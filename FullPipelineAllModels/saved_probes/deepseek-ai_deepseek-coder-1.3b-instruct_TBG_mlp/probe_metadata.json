@@ -1,0 +1,21 @@
+{
+  "model_id": "deepseek-ai/deepseek-coder-1.3b-instruct",
+  "model_family": "deepseek",
+  "feature_method": "TBG",
+  "classifier": "mlp",
+  "test_accuracy": 0.64,
+  "test_auc": 0.6153846153846154,
+  "feature_dim": 6144,
+  "layers": [
+    -3,
+    -2,
+    -1
+  ],
+  "n_train": 114,
+  "n_val": 25,
+  "n_test": 25,
+  "semantic_entropy_threshold": 1.3063341006708518,
+  "recommended_threshold": 0.6286093792537888,
+  "M_samples": 20,
+  "label_mode": "median"
+}

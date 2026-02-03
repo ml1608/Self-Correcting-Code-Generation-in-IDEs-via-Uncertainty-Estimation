@@ -1,0 +1,21 @@
+{
+  "model_id": "deepseek-ai/deepseek-coder-1.3b-instruct",
+  "model_family": "deepseek",
+  "feature_method": "SLT",
+  "classifier": "mlp",
+  "test_accuracy": 0.76,
+  "test_auc": 0.8782051282051282,
+  "feature_dim": 6144,
+  "layers": [
+    -3,
+    -2,
+    -1
+  ],
+  "n_train": 114,
+  "n_val": 25,
+  "n_test": 25,
+  "semantic_entropy_threshold": 1.3063341006708518,
+  "recommended_threshold": 0.5002132058178407,
+  "M_samples": 20,
+  "label_mode": "median"
+}
