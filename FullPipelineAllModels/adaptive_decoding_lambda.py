@@ -31,6 +31,10 @@ from tqdm import tqdm
 # ============================================================
 
 def get_config():
+    """
+    Get configuration for ADADEC-style adaptive decoding.
+    Uses TBG probe to detect uncertainty early, then uses lookahead scoring.
+    """
     return {
         "model_id": "meta-llama/Llama-3.2-3B-Instruct",
         "family": "llama",
@@ -39,10 +43,10 @@ def get_config():
         "split": "test",
         "limit_tasks": None,  # Set to a number for testing, or None for full 164
         
-        # Adaptive decoding parameters
+        # Adaptive decoding parameters (ADADEC-style)
         "max_new_tokens": 256,
-        "beam_size": 3,
-        "lookahead_length": 5,
+        "beam_size": 3,  # Top-K candidates for lookahead (B from ADADEC paper)
+        "lookahead_length": 5,  # Fixed lookahead length (L from ADADEC paper)
         
         # SEP probe settings
         "probe_path": "sep_slt_runs/meta-llama_Llama-3.2-3B-Instruct",  # Path to trained probe
@@ -56,6 +60,9 @@ def get_config():
         "test_timeout_s": 10,
         "seed": 42,
     }
+
+# Alias for compatibility
+get_adaptive_config = get_config
 
 SYSTEM_PROMPT = (
     "You are a Python coding assistant. Complete the function so that it passes the tests. "
@@ -182,6 +189,96 @@ def extract_features_multi_method(tok, model, full_ids_cpu: torch.Tensor, prompt
     return np.concatenate(features)
 
 @torch.inference_mode()
+def get_next_token_with_features(tok, model, input_ids, layers, prompt_len=None):
+    """
+    Get next token distribution and extract TBG features (ADADEC-style).
+    
+    TBG = Token Before Generation = last token in current sequence
+    This is extracted at each step during generation.
+    
+    Returns:
+        - logits: probability distribution over vocabulary
+        - tbg_features: features from last token in current sequence
+    """
+    # Forward pass
+    outputs = model(input_ids, output_hidden_states=True, use_cache=False)
+    logits = outputs.logits[0, -1, :]  # Last token logits
+    
+    # Extract TBG features (Token Before Generation = last token in current sequence)
+    # At each generation step, this is the last token we've generated so far
+    token_idx = input_ids.shape[1] - 1  # Last token in current sequence
+    
+    features = []
+    for layer in layers:
+        hs = outputs.hidden_states[layer]
+        # Ensure token_idx is valid
+        if token_idx >= hs.shape[1]:
+            token_idx = hs.shape[1] - 1
+        if token_idx < 0:
+            token_idx = 0
+        features.append(hs[0, token_idx, :].float().detach().cpu().numpy())
+    
+    tbg_features = np.concatenate(features)
+    
+    return logits, tbg_features
+
+@torch.inference_mode()
+def lookahead_score_token(tok, model, input_ids, candidate_token_id, lookahead_length):
+    """
+    ADADEC Lookahead Scoring (Section III-C of paper)
+    
+    Score a candidate token by:
+    1. Append candidate token to sequence
+    2. Generate next L tokens greedily (lookahead trajectory)
+    3. Compute average log-probability over the trajectory
+    
+    Args:
+        tok: tokenizer
+        model: language model
+        input_ids: current input sequence [1, seq_len]
+        candidate_token_id: token to score
+        lookahead_length: how many steps to lookahead (L from paper)
+    
+    Returns:
+        score: average log-probability of trajectory
+    """
+    # Start trajectory with candidate token
+    trajectory_ids = torch.cat([input_ids, torch.tensor([[candidate_token_id]]).to(input_ids.device)], dim=1)
+    
+    # Track log probabilities
+    log_probs = []
+    
+    # Get log-prob of candidate token itself
+    outputs = model(input_ids, use_cache=False)
+    logits = outputs.logits[0, -1, :]
+    log_prob_dist = torch.log_softmax(logits, dim=0)
+    log_probs.append(log_prob_dist[candidate_token_id].item())
+    
+    # Lookahead: generate next L tokens greedily
+    for step in range(lookahead_length):
+        outputs = model(trajectory_ids, use_cache=False)
+        logits = outputs.logits[0, -1, :]
+        
+        # Greedy selection for lookahead
+        next_token_id = logits.argmax().item()
+        
+        # Get log-probability
+        log_prob_dist = torch.log_softmax(logits, dim=0)
+        log_probs.append(log_prob_dist[next_token_id].item())
+        
+        # Append to trajectory
+        trajectory_ids = torch.cat([trajectory_ids, torch.tensor([[next_token_id]]).to(trajectory_ids.device)], dim=1)
+        
+        # Stop if EOS
+        if next_token_id == tok.eos_token_id:
+            break
+    
+    # Average log-probability (geometric mean, as in paper Section III-C)
+    avg_log_prob = sum(log_probs) / len(log_probs) if log_probs else -float('inf')
+    
+    return avg_log_prob
+
+@torch.inference_mode()
 def extract_slt_vec_multi_layer(tok, model, full_ids_cpu: torch.Tensor, layers: list = [-3, -2, -1]):
     """Extract SLT features from multiple layers and concatenate them (backward compatibility)."""
     # For backward compatibility, we need prompt_len, but we'll use -2 for SLT
@@ -241,6 +338,69 @@ def greedy_decode(tok, model, prompt: str, max_new_tokens: int = 256) -> Tuple[s
     return gen_text, (output_ids.shape[1] - input_ids.shape[1]), latency
 
 @torch.inference_mode()
+def adaptive_generate_one_token(tok, model, input_ids, probe_data, threshold, cfg, layers, verbose=False):
+    """
+    ADADEC: Generate next token with adaptive decoding
+    
+    This implements the full pause-then-rerank mechanism from the paper:
+    1. Get probability distribution and TBG features
+    2. Calculate uncertainty from probe
+    3. If uncertainty > threshold: PAUSE and RERANK using lookahead
+    4. If uncertainty <= threshold: use greedy (top-1 token)
+    
+    Returns:
+        - next_token_id: selected token
+        - used_adaptive: whether adaptive decoding was triggered
+        - uncertainty_score: uncertainty score from probe
+    """
+    # Step 1: Get next token distribution and TBG features
+    logits, tbg_features = get_next_token_with_features(tok, model, input_ids, layers)
+    
+    # Step 2: Get uncertainty score from probe
+    scaler = probe_data["scaler"]
+    classifier = probe_data["classifier"]
+    features_scaled = scaler.transform(tbg_features.reshape(1, -1))
+    uncertainty_score = classifier.predict_proba(features_scaled)[0, 1]
+    
+    if verbose:
+        print(f"    Probe uncertainty: {uncertainty_score:.4f}, Threshold: {threshold:.4f}")
+    
+    # Step 3: Decide whether to use adaptive decoding
+    if uncertainty_score > threshold:
+        # UNCERTAIN: Pause and rerank using lookahead
+        if verbose:
+            print(f"    → ADAPTIVE DECODING triggered!")
+        
+        # Get top-B candidates
+        top_k_values, top_k_indices = torch.topk(logits, k=cfg["lookahead_beam_size"])
+        
+        # Score each candidate using lookahead
+        candidate_scores = []
+        for i in range(cfg["lookahead_beam_size"]):
+            candidate_id = top_k_indices[i].item()
+            score = lookahead_score_token(
+                tok, model, input_ids, candidate_id, cfg["lookahead_length"]
+            )
+            candidate_scores.append((candidate_id, score))
+            if verbose:
+                token_text = tok.decode([candidate_id])
+                print(f"      Candidate {i+1}: '{token_text}' → score={score:.4f}")
+        
+        # Select best candidate
+        best_token_id = max(candidate_scores, key=lambda x: x[1])[0]
+        if verbose:
+            print(f"    → Selected: '{tok.decode([best_token_id])}'")
+        
+        return best_token_id, True, uncertainty_score
+    
+    else:
+        # CONFIDENT: Use greedy (top-1 token)
+        if verbose:
+            print(f"    → GREEDY (confident)")
+        best_token_id = logits.argmax().item()
+        return best_token_id, False, uncertainty_score
+
+@torch.inference_mode()
 def adaptive_decode(
     tok, 
     model, 
@@ -250,118 +410,109 @@ def adaptive_decode(
     lookahead_length: int = 5,
     sep_probe: Optional[Tuple] = None,  # (scaler, clf, threshold, feature_method)
     token_entropy_threshold: float = 3.5,
-) -> Tuple[str, int, float]:
+) -> Tuple[str, int, float, float]:
     """
-    Adaptive decoding: uses SEP probe to predict semantic entropy.
-    If predicted high semantic entropy, uses beam search with lookahead.
-    Otherwise, uses greedy decoding.
+    ADADEC-style adaptive decoding: uses TBG probe to detect uncertainty early.
+    When uncertain: use lookahead scoring (top-K candidates, lookahead L steps, pick best).
+    When confident: use greedy.
+    
+    Returns:
+        - generated_text: generated code
+        - num_tokens: number of tokens generated
+        - total_time: total generation time
+        - adaptive_ratio: fraction of steps that used adaptive decoding
     """
     chat_text = build_chat_text(tok, prompt)
     input_ids = tok(chat_text, return_tensors="pt").input_ids.to(model.device)
     output_ids = input_ids.clone()
-    prompt_len = input_ids.shape[1]  # Store prompt length for TBG feature extraction
     start_time = time.time()
     
     # Track adaptive decisions
-    adaptive_decisions = 0
-    total_decisions = 0
-
+    adaptive_steps = 0
+    total_steps = 0
+    all_uncertainties = []
+    
+    # Prepare probe data and config
+    if sep_probe is not None:
+        if len(sep_probe) == 4:
+            scaler, clf, threshold, feature_method = sep_probe
+        else:
+            scaler, clf, threshold = sep_probe
+            feature_method = "TBG"  # Default to TBG for ADADEC
+        
+        probe_data = {"scaler": scaler, "classifier": clf}
+        cfg = {
+            "lookahead_beam_size": beam_size,
+            "lookahead_length": lookahead_length,
+        }
+        layers = [-3, -2, -1]
+    else:
+        probe_data = None
+        threshold = None
+        cfg = None
+        layers = None
+    
+    # Generate tokens one by one
     for step in range(max_new_tokens):
-        outputs = model(output_ids, output_hidden_states=True)
-        logits = outputs.logits[:, -1, :]
-        probs = torch.nn.functional.softmax(logits, dim=-1)
-        
-        # Check if we should use adaptive decoding
-        use_adaptive = False
-        
-        if sep_probe is not None:
-            # Use SEP probe to predict semantic entropy
-            # sep_probe can be (scaler, clf, threshold) or (scaler, clf, threshold, feature_method)
-            if len(sep_probe) == 4:
-                scaler, clf, threshold, feature_method = sep_probe
-            else:
-                scaler, clf, threshold = sep_probe
-                feature_method = "SLT"  # Default to SLT for backward compatibility
-            
-            # Extract features using the specified method
-            full_ids_cpu = output_ids.detach().cpu()
-            feat = extract_features_multi_method(
-                tok, model, full_ids_cpu, prompt_len, 
-                layers=[-3, -2, -1], method=feature_method
+        if probe_data is not None:
+            # ADADEC: Use probe to detect uncertainty and decide
+            next_token_id, used_adaptive, uncertainty = adaptive_generate_one_token(
+                tok, model, output_ids, probe_data, threshold, cfg, layers,
+                verbose=(step < 3)  # Verbose for first 3 steps
             )
             
-            # Predict high semantic entropy (y=1)
-            feat_scaled = scaler.transform(feat.reshape(1, -1))
-            prob_high_entropy = clf.predict_proba(feat_scaled)[0, 1]  # Probability of high semantic entropy
-            
-            # DEBUG: Track predictions (sample first 3 steps and every 10th step to avoid spam)
-            if step < 3 or step % 10 == 0:
-                print(f"    [Step {step}] prob={prob_high_entropy:.4f}, threshold={threshold:.4f}, adaptive={prob_high_entropy > threshold}")
-            
-            # Use adaptive if predicted high semantic entropy (using auto-loaded threshold)
-            use_adaptive = prob_high_entropy > threshold 
+            if used_adaptive:
+                adaptive_steps += 1
+            total_steps += 1
+            all_uncertainties.append(uncertainty)
         else:
             # Fallback: use token entropy
+            outputs = model(output_ids, output_hidden_states=True)
+            logits = outputs.logits[:, -1, :]
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+            
             p = probs[0].detach().float().cpu().numpy()
             entropy = -float(np.sum(p * np.log(p + 1e-10)))
             use_adaptive = entropy > token_entropy_threshold
+            
+            if use_adaptive:
+                # Use lookahead scoring
+                topk = torch.topk(probs, beam_size, dim=-1)
+                candidate_tokens = topk.indices[0]
+                
+                best_score = -float("inf")
+                best_token = None
+                
+                for token in candidate_tokens:
+                    score = lookahead_score_token(
+                        tok, model, output_ids, token.item(), lookahead_length
+                    )
+                    if score > best_score:
+                        best_score = score
+                        best_token = token.item()
+                
+                next_token_id = best_token if best_token is not None else int(torch.argmax(probs))
+                adaptive_steps += 1
+            else:
+                next_token_id = int(torch.argmax(probs))
+            
+            total_steps += 1
         
-        total_decisions += 1
-        
-        if use_adaptive:
-            adaptive_decisions += 1
-            # Beam search with lookahead
-            topk = torch.topk(probs, beam_size, dim=-1)
-            candidate_tokens = topk.indices[0]
-            candidate_probs = topk.values[0]
+        # Append token
+        output_ids = torch.cat([output_ids, torch.tensor([[next_token_id]]).to(output_ids.device)], dim=1)
 
-            best_score = -float("inf")
-            best_token = None
-
-            for token, token_prob in zip(candidate_tokens, candidate_probs):
-                sim_ids = torch.cat([output_ids, token.view(1, 1)], dim=1)
-                score = math.log(float(token_prob) + 1e-10)
-
-                # Lookahead
-                for _ in range(lookahead_length):
-                    sim_out = model(sim_ids)
-                    sim_logits = sim_out.logits[:, -1, :]
-                    sim_probs = torch.nn.functional.softmax(sim_logits, dim=-1)
-
-                    nxt = torch.argmax(sim_probs, dim=-1)
-                    nxt_prob = sim_probs[0, nxt]
-                    score += math.log(float(nxt_prob) + 1e-10)
-
-                    sim_ids = torch.cat([sim_ids, nxt.view(1, 1)], dim=1)
-
-                    if tok.decode(int(nxt)) == "\n":
-                        break
-
-                traj_len = sim_ids.shape[1] - output_ids.shape[1]
-                avg_log_prob = score / max(traj_len, 1)
-
-                if avg_log_prob > best_score:
-                    best_score = avg_log_prob
-                    best_token = int(token)
-
-            next_token_id = best_token if best_token is not None else int(torch.argmax(probs))
-        else:
-            # Greedy decoding
-            next_token_id = int(torch.argmax(probs))
-
-        output_ids = torch.cat([output_ids, torch.tensor([[next_token_id]], device=model.device)], dim=1)
-
+        # Stop if EOS
         if next_token_id == tok.eos_token_id:
             break
 
     total_time = time.time() - start_time
-    generated_text = tok.decode(output_ids[0][input_ids.shape[1]:], skip_special_tokens=False)
     
-    adaptive_ratio = adaptive_decisions / max(total_decisions, 1)
+    # Decode generated text
+    prompt_len = tok(chat_text, return_tensors="pt").input_ids.shape[1]
+    generated_ids = output_ids[0, prompt_len:]
+    generated_text = tok.decode(generated_ids, skip_special_tokens=False)
     
-    # DEBUG: Warning if adaptive never triggered (only print once per generation, not for every step)
-    if sep_probe is not None and adaptive_ratio == 0.0 and total_decisions > 5:
-        pass  # Warning will be shown at task level instead
+    adaptive_ratio = adaptive_steps / max(total_steps, 1)
     
     return generated_text, (output_ids.shape[1] - input_ids.shape[1]), total_time, adaptive_ratio
 

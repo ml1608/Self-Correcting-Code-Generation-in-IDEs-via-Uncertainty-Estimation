@@ -55,6 +55,14 @@ except ImportError:
 # ============================================================
 
 def get_config():
+    """
+    Get configuration for MTE-style iterative resampling (self-correction).
+    Matches FullRegenCode.ipynb approach:
+    - Generate iteratively (one at a time)
+    - First attempt: temp=0.0 (greedy)
+    - Subsequent attempts: temp=0.3
+    - Check after each: correct AND uncertainty <= threshold → stop
+    """
     return {
         "model_id": "meta-llama/Llama-3.2-3B-Instruct",
         "family": "llama",
@@ -63,24 +71,15 @@ def get_config():
         "split": "test",
         "limit_tasks": None,  # Set to a number for testing, or None for full 164
         
-        # Self-correction parameters
+        # Self-correction parameters (MTE-style iterative resampling)
         "uncertainty_threshold": None,  # Auto-loaded from probe (None = use probe's recommended threshold)
-        "max_attempts": 2,  # Maximum correction attempts (reduced from 3 for speed)
-        "correction_strategy": "resample",  # Options: "adaptive", "resample", "both" (resample is faster)
+        "max_regeneration_attempts": 5,  # Maximum regeneration attempts (MTE-style)
+        "correction_strategy": "resample",  # Always use resample for MTE-style approach
         
         # Generation parameters
         "max_new_tokens": 256,
-        "initial_temperature": 0.0,  # Greedy for initial generation
-        "correction_temperature": 0.3,  # Slightly stochastic for corrections
-        
-        # Adaptive decoding parameters (if using adaptive strategy)
-        "beam_size": 3,
-        "lookahead_length": 5,
-        
-        # Resampling parameters (if using resample strategy)
         "resample_temperature": 0.3,  # Temperature for resamples (first uses 0.0, rest use this)
         "resample_top_p": 0.95,
-        "num_resamples": 5,  # Number of resamples to try (first at temp=0.0, rest at temp=0.3)
         
         # SEP probe settings
         "probe_path": "sep_slt_runs/meta-llama_Llama-3.2-3B-Instruct",
@@ -93,6 +92,9 @@ def get_config():
         "test_timeout_s": 10,
         "seed": 42,
     }
+
+# Alias for compatibility
+get_correction_config = get_config
 
 SYSTEM_PROMPT = (
     "You are a Python coding assistant. Complete the function so that it passes the tests. "
@@ -371,26 +373,36 @@ def estimate_uncertainty(
         scaler, clf, threshold = sep_probe
         feature_method = "SLT"  # Default to SLT for backward compatibility
     
-    # Reconstruct full generation context to extract features
+    # Reconstruct prompt context
     user_prompt = prompt + "\n\n# Your code below:\n"
     chat_text = build_chat_text(tok, user_prompt)
     
-    # Get the full sequence (prompt + generated code)
-    full_text = chat_text + generated_code
-    input_ids = tok(full_text, return_tensors="pt").input_ids.to(model.device)
-    prompt_len = tok(chat_text, return_tensors="pt").input_ids.shape[1]
-    
     # Extract features using the specified method
-    full_ids_cpu = input_ids.detach().cpu()
-    
-    if feature_method == "SLT" and _IMPORTED_FUNCTIONS:
-        # Use SLT extraction (backward compatibility)
-        feat = extract_slt_vec_multi_layer(tok, model, full_ids_cpu, layers=layers)
-    else:
-        # Use multi-method extraction (supports both SLT and TBG)
+    # CRITICAL: TBG must be extracted from prompt ONLY (before generation)
+    # SLT must be extracted from prompt + generated code (after generation)
+    if feature_method == "TBG":
+        # TBG: Extract from prompt only (matches training)
+        input_ids = tok(chat_text, return_tensors="pt").input_ids.to(model.device)
+        prompt_len = input_ids.shape[1]
+        full_ids_cpu = input_ids.detach().cpu()
         feat = extract_features_multi_method(
             tok, model, full_ids_cpu, prompt_len, layers=layers, method=feature_method
         )
+    else:
+        # SLT: Extract from prompt + generated code (matches training)
+        full_text = chat_text + generated_code
+        input_ids = tok(full_text, return_tensors="pt").input_ids.to(model.device)
+        prompt_len = tok(chat_text, return_tensors="pt").input_ids.shape[1]
+        full_ids_cpu = input_ids.detach().cpu()
+        
+        if feature_method == "SLT" and _IMPORTED_FUNCTIONS:
+            # Use SLT extraction (backward compatibility)
+            feat = extract_slt_vec_multi_layer(tok, model, full_ids_cpu, layers=layers)
+        else:
+            # Use multi-method extraction (supports both SLT and TBG)
+            feat = extract_features_multi_method(
+                tok, model, full_ids_cpu, prompt_len, layers=layers, method=feature_method
+            )
     
     # Predict uncertainty using SEP probe
     feat_scaled = scaler.transform(feat.reshape(1, -1))
@@ -403,59 +415,49 @@ def estimate_uncertainty(
 # ============================================================
 
 @torch.inference_mode()
-def resample_code(
+def generate_one_sample(
     tok,
     model,
     prompt: str,
     max_new_tokens: int = 256,
-    temperature: float = 0.3,
+    temperature: float = 0.0,
     top_p: float = 0.95,
-    num_samples: int = 5,
-) -> List[str]:
+) -> str:
     """
-    Generate multiple resamples.
-    First sample uses temp=0.0 (greedy), subsequent samples use specified temperature.
-    Similar to FullRegenCode.ipynb style.
+    Generate a single code sample.
     
     Returns:
-        List of code strings
+        Generated code string
     """
     user_prompt = prompt + "\n\n# Your code below:\n"
     chat_text = build_chat_text(tok, user_prompt)
     
-    samples = []
-    for i in range(num_samples):
-        # First sample: temp=0.0 (greedy, deterministic)
-        # Subsequent samples: use specified temperature
-        current_temp = 0.0 if i == 0 else temperature
-        
-        enc = tok(chat_text, return_tensors="pt").to(model.device)
-        
-        # Build generation kwargs
-        gen_kwargs = {
-            **enc,
-            "max_new_tokens": max_new_tokens,
-            "num_return_sequences": 1,
-            "pad_token_id": tok.eos_token_id,
-            "eos_token_id": tok.eos_token_id,
-        }
-        
-        # For greedy (temp=0.0), use do_sample=False
-        # For sampling (temp>0), use do_sample=True with temperature
-        if current_temp > 0.0:
-            gen_kwargs["do_sample"] = True
-            gen_kwargs["temperature"] = current_temp
-            gen_kwargs["top_p"] = top_p
-        else:
-            gen_kwargs["do_sample"] = False
-        
-        out = model.generate(**gen_kwargs)
-        gen_ids = out[0][enc["input_ids"].shape[1]:]
-        gen_text = tok.decode(gen_ids, skip_special_tokens=False)
-        code = extract_code(gen_text)
-        samples.append(code)
+    enc = tok(chat_text, return_tensors="pt").to(model.device)
     
-    return samples
+    # Build generation kwargs
+    gen_kwargs = {
+        **enc,
+        "max_new_tokens": max_new_tokens,
+        "num_return_sequences": 1,
+        "pad_token_id": tok.eos_token_id,
+        "eos_token_id": tok.eos_token_id,
+    }
+    
+    # For greedy (temp=0.0), use do_sample=False
+    # For sampling (temp>0), use do_sample=True with temperature
+    if temperature > 0.0:
+        gen_kwargs["do_sample"] = True
+        gen_kwargs["temperature"] = temperature
+        gen_kwargs["top_p"] = top_p
+    else:
+        gen_kwargs["do_sample"] = False
+    
+    out = model.generate(**gen_kwargs)
+    gen_ids = out[0][enc["input_ids"].shape[1]:]
+    gen_text = tok.decode(gen_ids, skip_special_tokens=False)
+    code = extract_code(gen_text)
+    
+    return code
 
 # ============================================================
 # Main Self-Correction Function
@@ -471,7 +473,14 @@ def correct_code(
     cfg: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     """
-    Generate code with automatic self-correction.
+    Generate code with MTE-style iterative resampling (self-correction).
+    
+    This matches the FullRegenCode.ipynb approach:
+    - Generate iteratively (one at a time)
+    - First attempt: temp=0.0 (greedy)
+    - Subsequent attempts: temp=0.3
+    - Check after each: correct AND uncertainty <= threshold → stop
+    - Return best attempt (prioritize correct, then lower uncertainty)
     
     Args:
         tok: Tokenizer
@@ -479,15 +488,15 @@ def correct_code(
         prompt: The code generation prompt
         test_src: Test code for evaluation
         entry_point: Function entry point name
-        sep_probe: Trained SEP probe (scaler, clf, threshold)
+        sep_probe: Trained SEP probe (scaler, clf, threshold, feature_method)
         cfg: Configuration dictionary
     
     Returns:
         Dictionary with:
         - final_code: Final generated code
         - uncertainty_score: Final uncertainty score
-        - num_corrections: Number of corrections made
-        - correction_history: List of correction attempts
+        - num_regenerations: Number of regeneration attempts
+        - all_attempts: List of all attempts
         - is_correct: Whether final code passes tests
         - total_time: Total generation time
     """
@@ -505,194 +514,110 @@ def correct_code(
     else:
         threshold = cfg.get("uncertainty_threshold", 0.5)
     
-    max_attempts = cfg["max_attempts"]
-    strategy = cfg["correction_strategy"]
+    max_attempts = cfg.get("max_regeneration_attempts", 5)
     layers = cfg.get("layers", [-3, -2, -1])
+    resample_temp = cfg.get("resample_temperature", 0.3)
     
     start_time = time.time()
-    correction_history = []
+    all_attempts = []
+    best_attempt = None
+    best_score = (-1, float('inf'))  # (correctness_score, uncertainty) - prefer correct, then lower uncertainty
     
-    # Initial generation
-    user_prompt = prompt + "\n\n# Your code below:\n"
-    current_code, _, _ = greedy_decode(
-        tok, model, user_prompt, max_new_tokens=cfg["max_new_tokens"]
-    )
-    current_code = extract_code(current_code)
-    
-    # Estimate initial uncertainty
-    initial_uncertainty = estimate_uncertainty(
-        tok, model, prompt, current_code, sep_probe, layers=layers
-    )
-    
-    # DEBUG: Show initial uncertainty
-    print(f"  [DEBUG] Initial uncertainty: {initial_uncertainty:.4f}, threshold: {threshold:.4f}")
-    
-    correction_history.append({
-        "attempt": 0,
-        "strategy": "initial",
-        "code": current_code,
-        "uncertainty": initial_uncertainty,
-        "is_correct": None,  # Will evaluate later
-    })
-    
-    best_code = current_code
-    best_uncertainty = initial_uncertainty
-    best_correct = None
-    
-    # Correction loop
-    for attempt in range(1, max_attempts + 1):
-        # EARLY STOP: If we found a correct solution, stop immediately
-        if best_correct is True:
-            print(f"  [DEBUG] Early stopping: found correct solution at attempt {attempt-1}")
-            break
+    # Iterative generation loop (MTE-style)
+    for attempt in range(max_attempts):
+        # First attempt: temp=0.0 (greedy, same as baseline)
+        # Subsequent attempts: temp=0.3
+        current_temp = 0.0 if attempt == 0 else resample_temp
         
-        # Check if we should correct
-        if best_uncertainty <= threshold:
-            print(f"  [DEBUG] Stopping corrections: uncertainty {best_uncertainty:.4f} <= threshold {threshold:.4f}")
-            break  # Confident enough, stop correcting
-        
-        print(f"  [DEBUG] Attempt {attempt}: uncertainty {best_uncertainty:.4f} > threshold {threshold:.4f}, triggering correction...")
-        
-        # Apply correction strategy
-        if strategy == "adaptive":
-            # Use adaptive decoding
-            ada_text, _, _, _ = adaptive_decode(
-                tok, model, user_prompt,
-                max_new_tokens=cfg["max_new_tokens"],
-                beam_size=cfg["beam_size"],
-                lookahead_length=cfg["lookahead_length"],
-                sep_probe=sep_probe,
-                token_entropy_threshold=3.5,
-            )
-            corrected_code = extract_code(ada_text)
-            strategy_used = "adaptive"
+        # Generate one sample
+        generated_code = generate_one_sample(
+            tok, model, prompt,
+            max_new_tokens=cfg["max_new_tokens"],
+            temperature=current_temp,
+            top_p=cfg.get("resample_top_p", 0.95)
+        )
             
-        elif strategy == "resample":
-            # Resample multiple times and pick best
-            resamples = resample_code(
-                tok, model, prompt,
-                max_new_tokens=cfg["max_new_tokens"],
-                temperature=cfg["resample_temperature"],
-                top_p=cfg["resample_top_p"],
-                num_samples=cfg["num_resamples"],
-            )
-            
-            # Evaluate uncertainty for each resample
-            resample_uncertainties = []
-            for code in resamples:
-                unc = estimate_uncertainty(tok, model, prompt, code, sep_probe, layers=layers)
-                resample_uncertainties.append((code, unc))
-            
-            # Pick the one with lowest uncertainty
-            resample_uncertainties.sort(key=lambda x: x[1])
-            corrected_code, _ = resample_uncertainties[0]
-            strategy_used = "resample"
-            
-        elif strategy == "both":
-            # Try both strategies and pick best
-            # Adaptive
-            ada_text, _, _, _ = adaptive_decode(
-                tok, model, user_prompt,
-                max_new_tokens=cfg["max_new_tokens"],
-                beam_size=cfg["beam_size"],
-                lookahead_length=cfg["lookahead_length"],
-                sep_probe=sep_probe,
-                token_entropy_threshold=3.5,
-            )
-            ada_code = extract_code(ada_text)
-            ada_unc = estimate_uncertainty(tok, model, prompt, ada_code, sep_probe, layers=layers)
-            
-            # Resample
-            resamples = resample_code(
-                tok, model, prompt,
-                max_new_tokens=cfg["max_new_tokens"],
-                temperature=cfg["resample_temperature"],
-                top_p=cfg["resample_top_p"],
-                num_samples=cfg["num_resamples"],
-            )
-            resample_uncertainties = []
-            for code in resamples:
-                unc = estimate_uncertainty(tok, model, prompt, code, sep_probe, layers=layers)
-                resample_uncertainties.append((code, unc))
-            
-            # Pick best (lowest uncertainty)
-            candidates = [(ada_code, ada_unc)] + resample_uncertainties
-            candidates.sort(key=lambda x: x[1])
-            corrected_code, _ = candidates[0]
-            strategy_used = "both"
-            
-        else:
-            # Default: just resample
-            resamples = resample_code(
-                tok, model, prompt,
-                max_new_tokens=cfg["max_new_tokens"],
-                temperature=cfg["resample_temperature"],
-                top_p=cfg["resample_top_p"],
-                num_samples=1,
-            )
-            corrected_code = resamples[0] if resamples else best_code
-            strategy_used = "resample"
-        
-        # Estimate uncertainty for corrected code
-        corrected_uncertainty = estimate_uncertainty(
-            tok, model, prompt, corrected_code, sep_probe, layers=layers
+        # Estimate uncertainty for this sample
+        uncertainty = estimate_uncertainty(
+            tok, model, prompt, generated_code, sep_probe, layers=layers
         )
         
-        print(f"  [DEBUG] After correction: uncertainty {corrected_uncertainty:.4f} (was {best_uncertainty:.4f})")
-        
-        # Evaluate correctness
-        corrected_correct = evaluate_completion(
-            prompt, test_src, entry_point, corrected_code, timeout_s=cfg["test_timeout_s"]
+        # Evaluate correctness for this attempt
+        is_correct = evaluate_completion(
+            prompt, test_src, entry_point, generated_code, timeout_s=cfg["test_timeout_s"]
         )
         
-        print(f"  [DEBUG] Correction result: correct={corrected_correct}, uncertainty_reduction={best_uncertainty - corrected_uncertainty:.4f}")
+        attempt_data = {
+            "attempt": attempt + 1,
+            "code": generated_code,
+            "uncertainty": uncertainty,
+            "temperature_used": current_temp,
+            "is_correct": is_correct,
+        }
+        all_attempts.append(attempt_data)
         
-        correction_history.append({
-            "attempt": attempt,
-            "strategy": strategy_used,
-            "code": corrected_code,
-            "uncertainty": corrected_uncertainty,
-            "is_correct": corrected_correct,
-        })
+        # Score this attempt: (correctness, uncertainty)
+        # Correct attempts score higher (1 vs 0), then sort by lower uncertainty (higher confidence)
+        attempt_score = (1 if is_correct else 0, uncertainty if uncertainty is not None else float('inf'))
+        if attempt_score > best_score:
+            best_score = attempt_score
+            best_attempt = attempt_data
         
-        # Update best if this is better (prioritize correctness, then lower uncertainty)
-        if corrected_correct and (best_correct is None or not best_correct):
-            best_code = corrected_code
-            best_uncertainty = corrected_uncertainty
-            best_correct = corrected_correct
-        elif corrected_uncertainty < best_uncertainty and (best_correct is None or not best_correct):
-            best_code = corrected_code
-            best_uncertainty = corrected_uncertainty
-            best_correct = corrected_correct
-        
-        # If we found a correct solution, we can stop early
-        if best_correct:
-            break
+        # Check if BOTH conditions are satisfied (MTE-style stopping)
+        # Stop when: correct AND uncertainty <= threshold
+        if is_correct and uncertainty is not None and uncertainty <= threshold:
+            # Perfect! Both correct and high confidence (low uncertainty)
+            total_time = time.time() - start_time
+            return {
+                "final_code": generated_code,
+                "uncertainty_score": uncertainty,
+                "initial_uncertainty": all_attempts[0]["uncertainty"] if all_attempts else uncertainty,
+                "num_regenerations": attempt,  # Number of regenerations (0 = first attempt succeeded)
+                "all_attempts": all_attempts,
+                "final_attempt_index": attempt,
+                "is_correct": True,
+                "total_time": total_time,
+            }
     
-    # Final evaluation
-    if best_correct is None:
-        best_correct = evaluate_completion(
-            prompt, test_src, entry_point, best_code, timeout_s=cfg["test_timeout_s"]
-        )
-    
+    # Max attempts reached - return best attempt
+    # Best = correct if available, otherwise lowest uncertainty (highest confidence)
     total_time = time.time() - start_time
     
-    # DEBUG: Summary
-    uncertainty_reduction = initial_uncertainty - best_uncertainty
-    print(f"  [DEBUG Summary] Initial: {initial_uncertainty:.4f}, Final: {best_uncertainty:.4f}, Reduction: {uncertainty_reduction:.4f}")
-    print(f"  [DEBUG Summary] Corrections made: {len(correction_history) - 1}, Final correct: {best_correct}")
+    if best_attempt:
+        return {
+            "final_code": best_attempt["code"],
+            "uncertainty_score": best_attempt["uncertainty"],
+            "initial_uncertainty": all_attempts[0]["uncertainty"] if all_attempts else best_attempt["uncertainty"],
+            "num_regenerations": max_attempts - 1,
+            "all_attempts": all_attempts,
+            "final_attempt_index": all_attempts.index(best_attempt) if best_attempt in all_attempts else len(all_attempts) - 1,
+            "is_correct": best_attempt["is_correct"],
+            "total_time": total_time,
+        }
     
-    if len(correction_history) == 1 and initial_uncertainty > threshold:
-        print(f"  [WARNING] No corrections made despite high initial uncertainty ({initial_uncertainty:.4f} > {threshold:.4f})")
-        print(f"            This may indicate an issue with correction triggering logic")
+    # Fallback - return last attempt
+    if all_attempts:
+        last_attempt = all_attempts[-1]
+        return {
+            "final_code": last_attempt["code"],
+            "uncertainty_score": last_attempt["uncertainty"],
+            "initial_uncertainty": all_attempts[0]["uncertainty"],
+            "num_regenerations": len(all_attempts) - 1,
+            "all_attempts": all_attempts,
+            "final_attempt_index": len(all_attempts) - 1,
+            "is_correct": last_attempt.get("is_correct", False),
+            "total_time": total_time,
+        }
     
+    # Should not reach here
     return {
-        "final_code": best_code,
-        "uncertainty_score": best_uncertainty,
-        "initial_uncertainty": initial_uncertainty,
-        "num_corrections": len(correction_history) - 1,
-        "correction_history": correction_history,
-        "is_correct": best_correct,
+        "final_code": "",
+        "uncertainty_score": 1.0,
+        "initial_uncertainty": 1.0,
+        "num_regenerations": 0,
+        "all_attempts": [],
+        "final_attempt_index": 0,
+        "is_correct": False,
         "total_time": total_time,
     }
 
@@ -754,7 +679,7 @@ def evaluate_self_correction(
         results["uncertainty_reductions"].append(
             correction_result["initial_uncertainty"] - correction_result["uncertainty_score"]
         )
-        results["num_corrections"].append(correction_result["num_corrections"])
+        results["num_corrections"].append(correction_result.get("num_regenerations", correction_result.get("num_corrections", 0)))
         
         results["task_results"].append({
             "task_id": task_id,
@@ -765,7 +690,7 @@ def evaluate_self_correction(
             "initial_uncertainty": correction_result["initial_uncertainty"],
             "final_uncertainty": correction_result["uncertainty_score"],
             "uncertainty_reduction": correction_result["initial_uncertainty"] - correction_result["uncertainty_score"],
-            "num_corrections": correction_result["num_corrections"],
+            "num_corrections": correction_result.get("num_regenerations", correction_result.get("num_corrections", 0)),
             "improved": correction_result["is_correct"] and not base_correct,
             "degraded": base_correct and not correction_result["is_correct"],
         })
