@@ -45,6 +45,7 @@ try:
         evaluate_completion,
         load_model,
     )
+
     _IMPORTED_FUNCTIONS = True
 except ImportError:
     _IMPORTED_FUNCTIONS = False
@@ -53,6 +54,7 @@ except ImportError:
 # ============================================================
 # Configuration
 # ============================================================
+
 
 def get_config():
     """
@@ -66,32 +68,27 @@ def get_config():
     return {
         "model_id": "meta-llama/Llama-3.2-3B-Instruct",
         "family": "llama",
-        
         "dataset_name": "openai_humaneval",
         "split": "test",
         "limit_tasks": None,  # Set to a number for testing, or None for full 164
-        
         # Self-correction parameters (MTE-style iterative resampling)
         "uncertainty_threshold": None,  # Auto-loaded from probe (None = use probe's recommended threshold)
         "max_regeneration_attempts": 5,  # Maximum regeneration attempts (MTE-style)
         "correction_strategy": "resample",  # Always use resample for MTE-style approach
-        
         # Generation parameters
         "max_new_tokens": 256,
         "resample_temperature": 0.3,  # Temperature for resamples (first uses 0.0, rest use this)
         "resample_top_p": 0.95,
-        
         # SEP probe settings
         "probe_path": "sep_slt_runs/meta-llama_Llama-3.2-3B-Instruct",
         "use_sep_probe": True,
-        
         # Feature extraction (must match training config)
         "layers": [-3, -2, -1],
-        
         # Evaluation
         "test_timeout_s": 10,
         "seed": 42,
     }
+
 
 # Alias for compatibility
 get_correction_config = get_config
@@ -107,43 +104,53 @@ SYSTEM_PROMPT = (
 
 if not _IMPORTED_FUNCTIONS:
     # Define functions here if import failed
-    def load_sep_probe(probe_dir: str, threshold_override: Optional[float] = None, feature_method: str = "SLT"):
+    def load_sep_probe(
+        probe_dir: str,
+        threshold_override: Optional[float] = None,
+        feature_method: str = "SLT",
+    ):
         """Load trained SEP probe and scaler."""
         probe_pkl_path = os.path.join(probe_dir, "probe.pkl")
         probe_json_path = os.path.join(probe_dir, "probe_metadata.json")
-        
+
         if os.path.exists(probe_pkl_path):
             with open(probe_pkl_path, "rb") as f:
                 probe_data = pickle.load(f)
             scaler = probe_data["scaler"]
             clf = probe_data["classifier"]
-            
+
             # Get feature method from metadata if available
             if os.path.exists(probe_json_path):
                 with open(probe_json_path, "r") as f:
                     probe_info = json.load(f)
                 feature_method = probe_info.get("feature_method", feature_method)
-            
+
             # Use threshold override if provided, otherwise try to get from probe data
             if threshold_override is not None:
                 threshold = threshold_override
                 print(f"✅ Loaded SEP probe: using override threshold={threshold:.4f}")
             elif "recommended_threshold" in probe_data:
                 threshold = probe_data["recommended_threshold"]
-                print(f"✅ Loaded SEP probe: using recommended threshold={threshold:.4f} (auto-loaded from probe training)")
+                print(
+                    f"✅ Loaded SEP probe: using recommended threshold={threshold:.4f} (auto-loaded from probe training)"
+                )
             elif "threshold" in probe_data:
                 threshold = probe_data["threshold"]
-                print(f"✅ Loaded SEP probe: using semantic entropy threshold={threshold:.4f} (fallback)")
+                print(
+                    f"✅ Loaded SEP probe: using semantic entropy threshold={threshold:.4f} (fallback)"
+                )
             else:
                 threshold = 0.5  # Default fallback
                 print(f"⚠️  No threshold found in probe, using default={threshold:.4f}")
-            
+
             return scaler, clf, threshold, feature_method
         print(f"⚠️  Probe not found at {probe_dir}")
         return None, None, None, feature_method
-    
+
     @torch.inference_mode()
-    def extract_slt_vec_multi_layer(tok, model, full_ids_cpu: torch.Tensor, layers: list = [-3, -2, -1]):
+    def extract_slt_vec_multi_layer(
+        tok, model, full_ids_cpu: torch.Tensor, layers: list = [-3, -2, -1]
+    ):
         """Extract SLT features from multiple layers and concatenate them."""
         full_ids = full_ids_cpu.unsqueeze(0).to(model.device)
         out = model(full_ids, output_hidden_states=True, use_cache=False)
@@ -160,10 +167,16 @@ if not _IMPORTED_FUNCTIONS:
                 token_idx = 0
             features.append(hs[0, token_idx, :].float().detach().cpu().numpy())
         return np.concatenate(features)
-    
+
     @torch.inference_mode()
-    def extract_features_multi_method(tok, model, full_ids_cpu: torch.Tensor, prompt_len: int, 
-                                       layers: list = [-3, -2, -1], method: str = "SLT"):
+    def extract_features_multi_method(
+        tok,
+        model,
+        full_ids_cpu: torch.Tensor,
+        prompt_len: int,
+        layers: list = [-3, -2, -1],
+        method: str = "SLT",
+    ):
         """Extract features using different methods (SLT or TBG)."""
         full_ids = full_ids_cpu.unsqueeze(0).to(model.device)
         out = model(full_ids, output_hidden_states=True, use_cache=False)
@@ -176,17 +189,17 @@ if not _IMPORTED_FUNCTIONS:
                 token_idx = prompt_len - 1
             else:
                 raise ValueError(f"Unknown method: {method}")
-            
+
             if token_idx < 0:
                 token_idx = hs.shape[1] + token_idx
             if token_idx >= hs.shape[1]:
                 token_idx = hs.shape[1] - 1
             if token_idx < 0:
                 token_idx = 0
-            
+
             features.append(hs[0, token_idx, :].float().detach().cpu().numpy())
         return np.concatenate(features)
-    
+
     def build_chat_text(tok, user_prompt: str):
         """Build chat-formatted text for Llama."""
         messages = [
@@ -194,11 +207,15 @@ if not _IMPORTED_FUNCTIONS:
             {"role": "user", "content": user_prompt},
         ]
         if getattr(tok, "chat_template", None) not in (None, ""):
-            return tok.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+            return tok.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False
+            )
         return f"[SYSTEM] {SYSTEM_PROMPT}\n[USER] {user_prompt}\n[ASSISTANT]\n"
-    
+
     @torch.inference_mode()
-    def greedy_decode(tok, model, prompt: str, max_new_tokens: int = 256) -> Tuple[str, int, float]:
+    def greedy_decode(
+        tok, model, prompt: str, max_new_tokens: int = 256
+    ) -> Tuple[str, int, float]:
         """Standard greedy decoding."""
         chat_text = build_chat_text(tok, prompt)
         input_ids = tok(chat_text, return_tensors="pt").input_ids.to(model.device)
@@ -207,18 +224,28 @@ if not _IMPORTED_FUNCTIONS:
         for _ in range(max_new_tokens):
             logits = model(output_ids).logits[:, -1, :]
             next_id = int(torch.argmax(logits, dim=-1))
-            output_ids = torch.cat([output_ids, torch.tensor([[next_id]], device=model.device)], dim=1)
+            output_ids = torch.cat(
+                [output_ids, torch.tensor([[next_id]], device=model.device)], dim=1
+            )
             if next_id == tok.eos_token_id:
                 break
         latency = time.time() - start
-        gen_text = tok.decode(output_ids[0][input_ids.shape[1]:], skip_special_tokens=False)
+        gen_text = tok.decode(
+            output_ids[0][input_ids.shape[1] :], skip_special_tokens=False
+        )
         return gen_text, (output_ids.shape[1] - input_ids.shape[1]), latency
-    
+
     @torch.inference_mode()
-    def adaptive_decode(tok, model, prompt: str, max_new_tokens: int = 256,
-                       beam_size: int = 3, lookahead_length: int = 5,
-                       sep_probe: Optional[Tuple] = None,
-                       token_entropy_threshold: float = 3.5) -> Tuple[str, int, float, float]:
+    def adaptive_decode(
+        tok,
+        model,
+        prompt: str,
+        max_new_tokens: int = 256,
+        beam_size: int = 3,
+        lookahead_length: int = 5,
+        sep_probe: Optional[Tuple] = None,
+        token_entropy_threshold: float = 3.5,
+    ) -> Tuple[str, int, float, float]:
         """Adaptive decoding with beam search and lookahead."""
         chat_text = build_chat_text(tok, prompt)
         input_ids = tok(chat_text, return_tensors="pt").input_ids.to(model.device)
@@ -234,7 +261,9 @@ if not _IMPORTED_FUNCTIONS:
             if sep_probe is not None:
                 scaler, clf, threshold = sep_probe
                 full_ids_cpu = output_ids.detach().cpu()
-                feat = extract_slt_vec_multi_layer(tok, model, full_ids_cpu, layers=[-3, -2, -1])
+                feat = extract_slt_vec_multi_layer(
+                    tok, model, full_ids_cpu, layers=[-3, -2, -1]
+                )
                 feat_scaled = scaler.transform(feat.reshape(1, -1))
                 prob_high_entropy = clf.predict_proba(feat_scaled)[0, 1]
                 use_adaptive = prob_high_entropy > 0.5
@@ -268,34 +297,52 @@ if not _IMPORTED_FUNCTIONS:
                     if avg_log_prob > best_score:
                         best_score = avg_log_prob
                         best_token = int(token)
-                next_token_id = best_token if best_token is not None else int(torch.argmax(probs))
+                next_token_id = (
+                    best_token if best_token is not None else int(torch.argmax(probs))
+                )
             else:
                 next_token_id = int(torch.argmax(probs))
-            output_ids = torch.cat([output_ids, torch.tensor([[next_token_id]], device=model.device)], dim=1)
+            output_ids = torch.cat(
+                [output_ids, torch.tensor([[next_token_id]], device=model.device)],
+                dim=1,
+            )
             if next_token_id == tok.eos_token_id:
                 break
         total_time = time.time() - start_time
-        generated_text = tok.decode(output_ids[0][input_ids.shape[1]:], skip_special_tokens=False)
+        generated_text = tok.decode(
+            output_ids[0][input_ids.shape[1] :], skip_special_tokens=False
+        )
         adaptive_ratio = adaptive_decisions / max(total_decisions, 1)
-        return generated_text, (output_ids.shape[1] - input_ids.shape[1]), total_time, adaptive_ratio
-    
+        return (
+            generated_text,
+            (output_ids.shape[1] - input_ids.shape[1]),
+            total_time,
+            adaptive_ratio,
+        )
+
     def extract_code(text: str) -> str:
         """Extract Python code from model output."""
-        blocks = re.findall(r"```(?:python)?\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+        blocks = re.findall(
+            r"```(?:python)?\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
+        )
         code = blocks[-1].strip() if blocks else text.strip()
         code = re.sub(r"^\s*```(?:python)?\s*", "", code, flags=re.IGNORECASE)
         code = re.sub(r"\s*```\s*$", "", code)
         return code
-    
-    def _run_test_with_timeout(module_src: str, entry_point: str, timeout_seconds: int = 10):
+
+    def _run_test_with_timeout(
+        module_src: str, entry_point: str, timeout_seconds: int = 10
+    ):
         """Run HumanEval test with timeout."""
         f = io.StringIO()
         use_timeout = hasattr(signal, "SIGALRM") and os.name != "nt"
         old_handler = None
         if use_timeout:
             try:
+
                 def handler(signum, frame):
                     raise TimeoutError(f"timeout>{timeout_seconds}s")
+
                 old_handler = signal.signal(signal.SIGALRM, handler)
                 signal.alarm(timeout_seconds)
             except Exception:
@@ -313,15 +360,19 @@ if not _IMPORTED_FUNCTIONS:
             if use_timeout and old_handler is not None:
                 signal.alarm(0)
                 signal.signal(signal.SIGALRM, old_handler)
-    
-    def evaluate_completion(prompt_src: str, test_src: str, entry_point: str, code: str, timeout_s: int = 10) -> bool:
+
+    def evaluate_completion(
+        prompt_src: str, test_src: str, entry_point: str, code: str, timeout_s: int = 10
+    ) -> bool:
         """Evaluate if generated code passes HumanEval tests."""
         if not code:
             return False
         module_src = prompt_src + "\n" + code + "\n\n" + test_src
-        ok, _ = _run_test_with_timeout(module_src, entry_point, timeout_seconds=timeout_s)
+        ok, _ = _run_test_with_timeout(
+            module_src, entry_point, timeout_seconds=timeout_s
+        )
         return ok
-    
+
     def load_model(model_id: str, hf_token: str | None):
         """Load model and tokenizer."""
         dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
@@ -339,129 +390,136 @@ if not _IMPORTED_FUNCTIONS:
             return None, None
         except OSError as e:
             msg = str(e)
-            if "gated repo" in msg.lower() or "401" in msg or "403" in msg or "unauthorized" in msg.lower():
+            if (
+                "gated repo" in msg.lower()
+                or "401" in msg
+                or "403" in msg
+                or "unauthorized" in msg.lower()
+            ):
                 print(f"[SKIP] Unauthorized / gated model: {model_id}\n  {e}")
                 return None, None
             raise
+
 
 # ============================================================
 # Uncertainty Estimation
 # ============================================================
 
-@torch.inference_mode()
-def estimate_uncertainty(
-    tok,
-    model,
-    prompt: str,
-    generated_code: str,
-    sep_probe: Optional[Tuple] = None,
-    layers: List[int] = [-3, -2, -1],
-) -> float:
-    """
-    Estimate uncertainty using SEP probe.
-    
-    Returns:
-        Probability of high semantic entropy (0-1), higher = more uncertain
-    """
-    if sep_probe is None:
-        return 0.5  # Default uncertainty if probe not available
-    
-    # sep_probe can be (scaler, clf, threshold) or (scaler, clf, threshold, feature_method)
-    if len(sep_probe) == 4:
-        scaler, clf, threshold, feature_method = sep_probe
-    else:
-        scaler, clf, threshold = sep_probe
-        feature_method = "SLT"  # Default to SLT for backward compatibility
-    
-    # Reconstruct prompt context
-    user_prompt = prompt + "\n\n# Your code below:\n"
-    chat_text = build_chat_text(tok, user_prompt)
-    
-    # Extract features using the specified method
-    # CRITICAL: TBG must be extracted from prompt ONLY (before generation)
-    # SLT must be extracted from prompt + generated code (after generation)
-    if feature_method == "TBG":
-        # TBG: Extract from prompt only (matches training)
-        input_ids = tok(chat_text, return_tensors="pt").input_ids.to(model.device)
-        prompt_len = input_ids.shape[1]
-        full_ids_cpu = input_ids.detach().cpu()
-        feat = extract_features_multi_method(
-            tok, model, full_ids_cpu, prompt_len, layers=layers, method=feature_method
-        )
-    else:
-        # SLT: Extract from prompt + generated code (matches training)
-        full_text = chat_text + generated_code
-        input_ids = tok(full_text, return_tensors="pt").input_ids.to(model.device)
-        prompt_len = tok(chat_text, return_tensors="pt").input_ids.shape[1]
-        full_ids_cpu = input_ids.detach().cpu()
-        
-        if feature_method == "SLT" and _IMPORTED_FUNCTIONS:
-            # Use SLT extraction (backward compatibility)
-            feat = extract_slt_vec_multi_layer(tok, model, full_ids_cpu, layers=layers)
-        else:
-            # Use multi-method extraction (supports both SLT and TBG)
-            feat = extract_features_multi_method(
-                tok, model, full_ids_cpu, prompt_len, layers=layers, method=feature_method
-            )
-    
-    # Predict uncertainty using SEP probe
-    feat_scaled = scaler.transform(feat.reshape(1, -1))
-    prob_high_entropy = clf.predict_proba(feat_scaled)[0, 1]  # Probability of high semantic entropy
-    
-    return float(prob_high_entropy)
+# @torch.inference_mode()
+# def estimate_uncertainty(
+#     tok,
+#     model,
+#     prompt: str,
+#     generated_code: str,
+#     sep_probe: Optional[Tuple] = None,
+#     layers: List[int] = [-3, -2, -1],
+# ) -> float:
+#     """
+#     Estimate uncertainty using SEP probe.
+
+#     Returns:
+#         Probability of high semantic entropy (0-1), higher = more uncertain
+#     """
+#     if sep_probe is None:
+#         return 0.5  # Default uncertainty if probe not available
+
+#     # sep_probe can be (scaler, clf, threshold) or (scaler, clf, threshold, feature_method)
+#     if len(sep_probe) == 4:
+#         scaler, clf, threshold, feature_method = sep_probe
+#     else:
+#         scaler, clf, threshold = sep_probe
+#         feature_method = "SLT"  # Default to SLT for backward compatibility
+
+#     # Reconstruct prompt context
+#     user_prompt = prompt + "\n\n# Your code below:\n"
+#     chat_text = build_chat_text(tok, user_prompt)
+
+#     # Extract features using the specified method
+#     # CRITICAL: TBG must be extracted from prompt ONLY (before generation)
+#     # SLT must be extracted from prompt + generated code (after generation)
+#     if feature_method == "TBG":
+#         # TBG: Extract from prompt only (matches training)
+#         input_ids = tok(chat_text, return_tensors="pt").input_ids.to(model.device)
+#         prompt_len = input_ids.shape[1]
+#         full_ids_cpu = input_ids.detach().cpu()
+#         feat = extract_features_multi_method(
+#             tok, model, full_ids_cpu, prompt_len, layers=layers, method=feature_method
+#         )
+#     else:
+#         # SLT: Extract from prompt + generated code (matches training)
+#         full_text = chat_text + generated_code
+#         input_ids = tok(full_text, return_tensors="pt").input_ids.to(model.device)
+#         prompt_len = tok(chat_text, return_tensors="pt").input_ids.shape[1]
+#         full_ids_cpu = input_ids.detach().cpu()
+
+#         if feature_method == "SLT" and _IMPORTED_FUNCTIONS:
+#             # Use SLT extraction (backward compatibility)
+#             feat = extract_slt_vec_multi_layer(tok, model, full_ids_cpu, layers=layers)
+#         else:
+#             # Use multi-method extraction (supports both SLT and TBG)
+#             feat = extract_features_multi_method(
+#                 tok, model, full_ids_cpu, prompt_len, layers=layers, method=feature_method
+#             )
+
+#     # Predict uncertainty using SEP probe
+#     feat_scaled = scaler.transform(feat.reshape(1, -1))
+#     prob_high_entropy = clf.predict_proba(feat_scaled)[0, 1]  # Probability of high semantic entropy
+
+#     return float(prob_high_entropy)
 
 # ============================================================
 # Correction Strategies
 # ============================================================
 
-@torch.inference_mode()
-def generate_one_sample(
-    tok,
-    model,
-    prompt: str,
-    max_new_tokens: int = 256,
-    temperature: float = 0.0,
-    top_p: float = 0.95,
-) -> str:
-    """
-    Generate a single code sample.
-    
-    Returns:
-        Generated code string
-    """
-    user_prompt = prompt + "\n\n# Your code below:\n"
-    chat_text = build_chat_text(tok, user_prompt)
-    
-    enc = tok(chat_text, return_tensors="pt").to(model.device)
-    
-    # Build generation kwargs
-    gen_kwargs = {
-        **enc,
-        "max_new_tokens": max_new_tokens,
-        "num_return_sequences": 1,
-        "pad_token_id": tok.eos_token_id,
-        "eos_token_id": tok.eos_token_id,
-    }
-    
-    # For greedy (temp=0.0), use do_sample=False
-    # For sampling (temp>0), use do_sample=True with temperature
-    if temperature > 0.0:
-        gen_kwargs["do_sample"] = True
-        gen_kwargs["temperature"] = temperature
-        gen_kwargs["top_p"] = top_p
-    else:
-        gen_kwargs["do_sample"] = False
-    
-    out = model.generate(**gen_kwargs)
-    gen_ids = out[0][enc["input_ids"].shape[1]:]
-    gen_text = tok.decode(gen_ids, skip_special_tokens=False)
-    code = extract_code(gen_text)
-    
-    return code
+# @torch.inference_mode()
+# def generate_one_sample(
+#     tok,
+#     model,
+#     prompt: str,
+#     max_new_tokens: int = 256,
+#     temperature: float = 0.0,
+#     top_p: float = 0.95,
+# ) -> str:
+#     """
+#     Generate a single code sample.
+
+#     Returns:
+#         Generated code string
+#     """
+#     user_prompt = prompt + "\n\n# Your code below:\n"
+#     chat_text = build_chat_text(tok, user_prompt)
+
+#     enc = tok(chat_text, return_tensors="pt").to(model.device)
+
+#     # Build generation kwargs
+#     gen_kwargs = {
+#         **enc,
+#         "max_new_tokens": max_new_tokens,
+#         "num_return_sequences": 1,
+#         "pad_token_id": tok.eos_token_id,
+#         "eos_token_id": tok.eos_token_id,
+#     }
+
+#     # For greedy (temp=0.0), use do_sample=False
+#     # For sampling (temp>0), use do_sample=True with temperature
+#     if temperature > 0.0:
+#         gen_kwargs["do_sample"] = True
+#         gen_kwargs["temperature"] = temperature
+#         gen_kwargs["top_p"] = top_p
+#     else:
+#         gen_kwargs["do_sample"] = False
+
+#     out = model.generate(**gen_kwargs)
+#     gen_ids = out[0][enc["input_ids"].shape[1]:]
+#     gen_text = tok.decode(gen_ids, skip_special_tokens=False)
+#     code = extract_code(gen_text)
+
+#     return code
 
 # ============================================================
 # Main Self-Correction Function
 # ============================================================
+
 
 def correct_code(
     tok,
@@ -474,14 +532,14 @@ def correct_code(
 ) -> Dict[str, Any]:
     """
     Generate code with MTE-style iterative resampling (self-correction).
-    
+
     This matches the FullRegenCode.ipynb approach:
     - Generate iteratively (one at a time)
     - First attempt: temp=0.0 (greedy)
     - Subsequent attempts: temp=0.3
     - Check after each: correct AND uncertainty <= threshold → stop
     - Return best attempt (prioritize correct, then lower uncertainty)
-    
+
     Args:
         tok: Tokenizer
         model: Language model
@@ -490,7 +548,7 @@ def correct_code(
         entry_point: Function entry point name
         sep_probe: Trained SEP probe (scaler, clf, threshold, feature_method)
         cfg: Configuration dictionary
-    
+
     Returns:
         Dictionary with:
         - final_code: Final generated code
@@ -502,7 +560,7 @@ def correct_code(
     """
     if cfg is None:
         cfg = get_config()
-    
+
     # Auto-load threshold from probe if not set in config
     if cfg["uncertainty_threshold"] is None and sep_probe is not None:
         # sep_probe can be (scaler, clf, threshold) or (scaler, clf, threshold, feature_method)
@@ -513,40 +571,49 @@ def correct_code(
         print(f"  [INFO] Using probe's recommended threshold: {threshold:.4f}")
     else:
         threshold = cfg.get("uncertainty_threshold", 0.5)
-    
+
     max_attempts = cfg.get("max_regeneration_attempts", 5)
     layers = cfg.get("layers", [-3, -2, -1])
     resample_temp = cfg.get("resample_temperature", 0.3)
-    
+
     start_time = time.time()
     all_attempts = []
     best_attempt = None
-    best_score = (-1, float('inf'))  # (correctness_score, uncertainty) - prefer correct, then lower uncertainty
-    
+    best_score = (
+        -1,
+        float("inf"),
+    )  # (correctness_score, uncertainty) - prefer correct, then lower uncertainty
+
     # Iterative generation loop (MTE-style)
     for attempt in range(max_attempts):
         # First attempt: temp=0.0 (greedy, same as baseline)
         # Subsequent attempts: temp=0.3
         current_temp = 0.0 if attempt == 0 else resample_temp
-        
+
         # Generate one sample
         generated_code = generate_one_sample(
-            tok, model, prompt,
+            tok,
+            model,
+            prompt,
             max_new_tokens=cfg["max_new_tokens"],
             temperature=current_temp,
-            top_p=cfg.get("resample_top_p", 0.95)
+            top_p=cfg.get("resample_top_p", 0.95),
         )
-            
+
         # Estimate uncertainty for this sample
         uncertainty = estimate_uncertainty(
             tok, model, prompt, generated_code, sep_probe, layers=layers
         )
-        
+
         # Evaluate correctness for this attempt
         is_correct = evaluate_completion(
-            prompt, test_src, entry_point, generated_code, timeout_s=cfg["test_timeout_s"]
+            prompt,
+            test_src,
+            entry_point,
+            generated_code,
+            timeout_s=cfg["test_timeout_s"],
         )
-        
+
         attempt_data = {
             "attempt": attempt + 1,
             "code": generated_code,
@@ -555,14 +622,17 @@ def correct_code(
             "is_correct": is_correct,
         }
         all_attempts.append(attempt_data)
-        
+
         # Score this attempt: (correctness, uncertainty)
         # Correct attempts score higher (1 vs 0), then sort by lower uncertainty (higher confidence)
-        attempt_score = (1 if is_correct else 0, uncertainty if uncertainty is not None else float('inf'))
+        attempt_score = (
+            1 if is_correct else 0,
+            uncertainty if uncertainty is not None else float("inf"),
+        )
         if attempt_score > best_score:
             best_score = attempt_score
             best_attempt = attempt_data
-        
+
         # Check if BOTH conditions are satisfied (MTE-style stopping)
         # Stop when: correct AND uncertainty <= threshold
         if is_correct and uncertainty is not None and uncertainty <= threshold:
@@ -571,30 +641,40 @@ def correct_code(
             return {
                 "final_code": generated_code,
                 "uncertainty_score": uncertainty,
-                "initial_uncertainty": all_attempts[0]["uncertainty"] if all_attempts else uncertainty,
+                "initial_uncertainty": (
+                    all_attempts[0]["uncertainty"] if all_attempts else uncertainty
+                ),
                 "num_regenerations": attempt,  # Number of regenerations (0 = first attempt succeeded)
                 "all_attempts": all_attempts,
                 "final_attempt_index": attempt,
                 "is_correct": True,
                 "total_time": total_time,
             }
-    
+
     # Max attempts reached - return best attempt
     # Best = correct if available, otherwise lowest uncertainty (highest confidence)
     total_time = time.time() - start_time
-    
+
     if best_attempt:
         return {
             "final_code": best_attempt["code"],
             "uncertainty_score": best_attempt["uncertainty"],
-            "initial_uncertainty": all_attempts[0]["uncertainty"] if all_attempts else best_attempt["uncertainty"],
+            "initial_uncertainty": (
+                all_attempts[0]["uncertainty"]
+                if all_attempts
+                else best_attempt["uncertainty"]
+            ),
             "num_regenerations": max_attempts - 1,
             "all_attempts": all_attempts,
-            "final_attempt_index": all_attempts.index(best_attempt) if best_attempt in all_attempts else len(all_attempts) - 1,
+            "final_attempt_index": (
+                all_attempts.index(best_attempt)
+                if best_attempt in all_attempts
+                else len(all_attempts) - 1
+            ),
             "is_correct": best_attempt["is_correct"],
             "total_time": total_time,
         }
-    
+
     # Fallback - return last attempt
     if all_attempts:
         last_attempt = all_attempts[-1]
@@ -608,7 +688,7 @@ def correct_code(
             "is_correct": last_attempt.get("is_correct", False),
             "total_time": total_time,
         }
-    
+
     # Should not reach here
     return {
         "final_code": "",
@@ -621,9 +701,11 @@ def correct_code(
         "total_time": total_time,
     }
 
+
 # ============================================================
 # Evaluation Function
 # ============================================================
+
 
 def evaluate_self_correction(
     tasks: List[Dict[str, Any]],
@@ -633,11 +715,11 @@ def evaluate_self_correction(
     sep_probe: Optional[Tuple] = None,
 ) -> Dict[str, Any]:
     """Evaluate self-correction on HumanEval tasks."""
-    
+
     n = len(tasks)
     if n == 0:
         return {"error": "No tasks provided"}
-    
+
     results = {
         "baseline_pass": 0,
         "corrected_pass": 0,
@@ -647,13 +729,13 @@ def evaluate_self_correction(
         "num_corrections": [],
         "task_results": [],
     }
-    
+
     for task in tqdm(tasks, desc="Evaluating self-correction", unit="task"):
         task_id = task["task_id"]
         prompt = task["prompt"]
         test_src = task["test"]
         entry_point = task["entry_point"]
-        
+
         # Baseline: greedy decode
         user_prompt = prompt + "\n\n# Your code below:\n"
         base_text, _, base_latency = greedy_decode(
@@ -663,106 +745,130 @@ def evaluate_self_correction(
         base_correct = evaluate_completion(
             prompt, test_src, entry_point, base_code, timeout_s=cfg["test_timeout_s"]
         )
-        
+
         if base_correct:
             results["baseline_pass"] += 1
         results["baseline_latencies"].append(base_latency)
-        
+
         # Self-correction
         correction_result = correct_code(
             tok, model, prompt, test_src, entry_point, sep_probe=sep_probe, cfg=cfg
         )
-        
+
         if correction_result["is_correct"]:
             results["corrected_pass"] += 1
         results["corrected_latencies"].append(correction_result["total_time"])
         results["uncertainty_reductions"].append(
-            correction_result["initial_uncertainty"] - correction_result["uncertainty_score"]
+            correction_result["initial_uncertainty"]
+            - correction_result["uncertainty_score"]
         )
-        results["num_corrections"].append(correction_result.get("num_regenerations", correction_result.get("num_corrections", 0)))
-        
-        results["task_results"].append({
-            "task_id": task_id,
-            "baseline_correct": base_correct,
-            "corrected_correct": correction_result["is_correct"],
-            "baseline_latency": base_latency,
-            "corrected_latency": correction_result["total_time"],
-            "initial_uncertainty": correction_result["initial_uncertainty"],
-            "final_uncertainty": correction_result["uncertainty_score"],
-            "uncertainty_reduction": correction_result["initial_uncertainty"] - correction_result["uncertainty_score"],
-            "num_corrections": correction_result.get("num_regenerations", correction_result.get("num_corrections", 0)),
-            "improved": correction_result["is_correct"] and not base_correct,
-            "degraded": base_correct and not correction_result["is_correct"],
-        })
-    
+        results["num_corrections"].append(
+            correction_result.get(
+                "num_regenerations", correction_result.get("num_corrections", 0)
+            )
+        )
+
+        results["task_results"].append(
+            {
+                "task_id": task_id,
+                "baseline_correct": base_correct,
+                "corrected_correct": correction_result["is_correct"],
+                "baseline_latency": base_latency,
+                "corrected_latency": correction_result["total_time"],
+                "initial_uncertainty": correction_result["initial_uncertainty"],
+                "final_uncertainty": correction_result["uncertainty_score"],
+                "uncertainty_reduction": correction_result["initial_uncertainty"]
+                - correction_result["uncertainty_score"],
+                "num_corrections": correction_result.get(
+                    "num_regenerations", correction_result.get("num_corrections", 0)
+                ),
+                "improved": correction_result["is_correct"] and not base_correct,
+                "degraded": base_correct and not correction_result["is_correct"],
+            }
+        )
+
     # Compute summary statistics
     results["baseline_pass_at_1"] = results["baseline_pass"] / n
     results["corrected_pass_at_1"] = results["corrected_pass"] / n
-    results["improvement"] = results["corrected_pass_at_1"] - results["baseline_pass_at_1"]
+    results["improvement"] = (
+        results["corrected_pass_at_1"] - results["baseline_pass_at_1"]
+    )
     results["avg_baseline_latency"] = float(np.mean(results["baseline_latencies"]))
     results["avg_corrected_latency"] = float(np.mean(results["corrected_latencies"]))
-    results["avg_uncertainty_reduction"] = float(np.mean(results["uncertainty_reductions"]))
+    results["avg_uncertainty_reduction"] = float(
+        np.mean(results["uncertainty_reductions"])
+    )
     results["avg_num_corrections"] = float(np.mean(results["num_corrections"]))
-    
+
     # Count improvements/degradations
     results["num_improved"] = sum(1 for r in results["task_results"] if r["improved"])
     results["num_degraded"] = sum(1 for r in results["task_results"] if r["degraded"])
-    
+
     # DEBUG: Analyze correction behavior
     avg_corrections = results["avg_num_corrections"]
     avg_uncertainty_reduction = results["avg_uncertainty_reduction"]
-    
+
     if avg_corrections < 0.1:
-        print(f"\n⚠️  WARNING: Self-correction rarely triggered (avg corrections: {avg_corrections:.2f})")
-        print(f"   This suggests the uncertainty threshold ({cfg.get('uncertainty_threshold', 0.5)}) may be too high")
+        print(
+            f"\n⚠️  WARNING: Self-correction rarely triggered (avg corrections: {avg_corrections:.2f})"
+        )
+        print(
+            f"   This suggests the uncertainty threshold ({cfg.get('uncertainty_threshold', 0.5)}) may be too high"
+        )
         print(f"   Check probe training output for recommended threshold")
-    
+
     if abs(avg_uncertainty_reduction) < 0.01:
-        print(f"\n⚠️  WARNING: Minimal uncertainty reduction ({avg_uncertainty_reduction:.4f})")
+        print(
+            f"\n⚠️  WARNING: Minimal uncertainty reduction ({avg_uncertainty_reduction:.4f})"
+        )
         print(f"   This may indicate:")
         print(f"   - Corrections not being applied effectively")
         print(f"   - Probe predictions not changing after corrections")
         print(f"   - Threshold too high (corrections never trigger)")
-    
+
     return results
+
 
 # ============================================================
 # Main
 # ============================================================
 
+
 def main():
     """Demo of self-correction on HumanEval problems."""
     print("=== Self-Correction with SEP Probe ===")
     cfg = get_config()
-    
+
     # HF token
     HF_TOKEN = os.environ.get("HF_TOKEN")
     if not HF_TOKEN:
         print("\nHugging Face login (token is not printed).")
-        HF_TOKEN = getpass("Paste your Hugging Face token (with Llama access): ").strip()
+        HF_TOKEN = getpass(
+            "Paste your Hugging Face token (with Llama access): "
+        ).strip()
         if not HF_TOKEN:
             raise ValueError("Empty HF token. Please paste a valid token.")
-    
+
     login(HF_TOKEN, add_to_git_credential=False)
     print("✅ Logged in successfully!")
-    
+
     # Load dataset
     ds = load_dataset(cfg["dataset_name"])[cfg["split"]]
     tasks = [ds[i] for i in range(len(ds))]
-    
+
     if cfg["limit_tasks"] is not None:
-        tasks = tasks[:cfg["limit_tasks"]]
+        tasks = tasks[: cfg["limit_tasks"]]
         print(f"\nUsing limited HumanEval tasks: {len(tasks)}")
     else:
         print(f"\nUsing full HumanEval tasks: {len(tasks)}")
-    
+
     # Load model
     print(f"\nLoading model: {cfg['model_id']}")
     tok, model = load_model(cfg["model_id"], hf_token=HF_TOKEN)
     if tok is None:
         print("[ERROR] Could not load model")
         return
-    
+
     # Load SEP probe
     sep_probe = None
     if cfg["use_sep_probe"]:
@@ -775,23 +881,27 @@ def main():
             print(f"⚠️  SEP probe not found, self-correction will use fallback")
     else:
         print("⚠️  SEP probe disabled, self-correction may not work optimally")
-    
+
     # Evaluate
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("Starting self-correction evaluation...")
     print(f"Uncertainty threshold: {cfg['uncertainty_threshold']}")
     print(f"Max attempts: {cfg['max_attempts']}")
     print(f"Correction strategy: {cfg['correction_strategy']}")
-    print("="*80)
-    
+    print("=" * 80)
+
     results = evaluate_self_correction(tasks, tok, model, cfg, sep_probe=sep_probe)
-    
+
     # Print results
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("RESULTS")
-    print("="*80)
-    print(f"Baseline (Greedy) Pass@1: {results['baseline_pass_at_1']:.4f} ({results['baseline_pass']}/{len(tasks)})")
-    print(f"Self-Corrected Pass@1:    {results['corrected_pass_at_1']:.4f} ({results['corrected_pass']}/{len(tasks)})")
+    print("=" * 80)
+    print(
+        f"Baseline (Greedy) Pass@1: {results['baseline_pass_at_1']:.4f} ({results['baseline_pass']}/{len(tasks)})"
+    )
+    print(
+        f"Self-Corrected Pass@1:    {results['corrected_pass_at_1']:.4f} ({results['corrected_pass']}/{len(tasks)})"
+    )
     print(f"Improvement:              {results['improvement']:+.4f}")
     print(f"\nTasks improved:  {results['num_improved']}")
     print(f"Tasks degraded:  {results['num_degraded']}")
@@ -799,15 +909,15 @@ def main():
     print(f"Avg corrected latency:  {results['avg_corrected_latency']:.3f}s")
     print(f"Avg uncertainty reduction: {results['avg_uncertainty_reduction']:.4f}")
     print(f"Avg corrections per task: {results['avg_num_corrections']:.2f}")
-    
+
     # Save results
     output_file = "self_correction_results.json"
     with open(output_file, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\n✅ Results saved to {output_file}")
-    
+
     print("\n✅ Done!")
+
 
 if __name__ == "__main__":
     main()
-
