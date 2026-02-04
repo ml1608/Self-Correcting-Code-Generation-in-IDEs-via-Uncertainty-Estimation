@@ -75,6 +75,7 @@ def get_config():
         "uncertainty_threshold": None,  # Auto-loaded from probe (None = use probe's recommended threshold)
         "max_regeneration_attempts": 5,  # Maximum regeneration attempts (MTE-style)
         "correction_strategy": "resample",  # Always use resample for MTE-style approach
+        "correction_method": "uncertainty",  # "uncertainty" or "verification"
         # Generation parameters
         "max_new_tokens": 256,
         "resample_temperature": 0.3,  # Temperature for resamples (first uses 0.0, rest use this)
@@ -531,14 +532,16 @@ def correct_code(
     cfg: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     """
-    Generate code with MTE-style iterative resampling (self-correction).
+    Generate code with MTE-style iterative resampling (self-correction) using uncertainty or verification.
 
     This matches the FullRegenCode.ipynb approach:
     - Generate iteratively (one at a time)
     - First attempt: temp=0.0 (greedy)
     - Subsequent attempts: temp=0.3
-    - Check after each: correct AND uncertainty <= threshold → stop
-    - Return best attempt (prioritize correct, then lower uncertainty)
+    - Check after each:
+        - if method = "uncertainty": uncertainty <= threshold → stop
+        - if method = "verification": correct → stop
+    - Return best attempt (lowest uncertainty or correct code)
 
     Args:
         tok: Tokenizer
@@ -548,7 +551,6 @@ def correct_code(
         entry_point: Function entry point name
         sep_probe: Trained SEP probe (scaler, clf, threshold, feature_method)
         cfg: Configuration dictionary
-
     Returns:
         Dictionary with:
         - final_code: Final generated code
@@ -558,6 +560,11 @@ def correct_code(
         - is_correct: Whether final code passes tests
         - total_time: Total generation time
     """
+    method = cfg.get("correction_method", "uncertainty")
+    assert method in ["uncertainty", "verification"], ValueError(
+        f"Invalid method: {method}. Must be 'uncertainty' or 'verification'."
+    )
+
     if cfg is None:
         cfg = get_config()
 
@@ -576,16 +583,15 @@ def correct_code(
     layers = cfg.get("layers", [-3, -2, -1])
     resample_temp = cfg.get("resample_temperature", 0.3)
 
-    start_time = time.time()
     all_attempts = []
     best_attempt = None
-    best_score = (
-        -1,
-        float("inf"),
-    )  # (correctness_score, uncertainty) - prefer correct, then lower uncertainty
+    best_score = float("inf")  # uncertainty - prefer lower uncertainty
+    start_time = time.time()
 
     # Iterative generation loop (MTE-style)
-    for attempt in range(max_attempts):
+    for attempt in range(
+        max_attempts + 1
+    ):  # +1 for the initial attempt. the initial attempt is not a regeneration attempt.
         # First attempt: temp=0.0 (greedy, same as baseline)
         # Subsequent attempts: temp=0.3
         current_temp = 0.0 if attempt == 0 else resample_temp
@@ -600,62 +606,98 @@ def correct_code(
             top_p=cfg.get("resample_top_p", 0.95),
         )
 
-        # Estimate uncertainty for this sample
-        uncertainty = estimate_uncertainty(
-            tok, model, prompt, generated_code, sep_probe, layers=layers
-        )
-
-        # Evaluate correctness for this attempt
-        is_correct = evaluate_completion(
-            prompt,
-            test_src,
-            entry_point,
-            generated_code,
-            timeout_s=cfg["test_timeout_s"],
-        )
+        if method == "uncertainty":
+            # Estimate uncertainty for this sample
+            uncertainty = estimate_uncertainty(
+                tok, model, prompt, generated_code, sep_probe, layers=layers
+            )
+        elif method == "verification":
+            # Verify this sample
+            is_correct = evaluate_completion(
+                prompt,
+                test_src,
+                entry_point,
+                generated_code,
+                timeout_s=cfg["test_timeout_s"],
+            )
 
         attempt_data = {
-            "attempt": attempt + 1,
+            "attempt": attempt,
             "code": generated_code,
-            "uncertainty": uncertainty,
+            "uncertainty": uncertainty if method == "uncertainty" else None,
             "temperature_used": current_temp,
-            "is_correct": is_correct,
+            "attempt_index": attempt,
+            "is_correct": is_correct if method == "verification" else None,
         }
         all_attempts.append(attempt_data)
 
         # Score this attempt: (correctness, uncertainty)
         # Correct attempts score higher (1 vs 0), then sort by lower uncertainty (higher confidence)
-        attempt_score = (
-            1 if is_correct else 0,
-            uncertainty if uncertainty is not None else float("inf"),
-        )
-        if attempt_score > best_score:
-            best_score = attempt_score
-            best_attempt = attempt_data
+        # attempt_score = (
+        #     1 if is_correct else 0,
+        #     uncertainty if uncertainty is not None else float("inf"),
+        # )
+        # if attempt_score > best_score:
+        #     best_score = attempt_score
+        #     best_attempt = attempt_data
 
-        # Check if BOTH conditions are satisfied (MTE-style stopping)
-        # Stop when: correct AND uncertainty <= threshold
-        if is_correct and uncertainty is not None and uncertainty <= threshold:
-            # Perfect! Both correct and high confidence (low uncertainty)
-            total_time = time.time() - start_time
-            return {
-                "final_code": generated_code,
-                "uncertainty_score": uncertainty,
-                "initial_uncertainty": (
-                    all_attempts[0]["uncertainty"] if all_attempts else uncertainty
-                ),
-                "num_regenerations": attempt,  # Number of regenerations (0 = first attempt succeeded)
-                "all_attempts": all_attempts,
-                "final_attempt_index": attempt,
-                "is_correct": True,
-                "total_time": total_time,
-            }
+        # Check conditions are satisfied (MTE-style stopping)
+        # Stop when:
+        # - if method = "uncertainty" AND uncertainty <= threshold
+        # - if method = "verification" ANDcorrect
+        if method == "uncertainty":
+            if uncertainty <= threshold:
+                return {
+                    "final_code": generated_code,
+                    "uncertainty_score": uncertainty,
+                    "initial_uncertainty": (
+                        all_attempts[0]["uncertainty"] if all_attempts else uncertainty
+                    ),
+                    "num_regenerations": attempt,  # Number of regenerations (0 = first attempt succeeded)
+                    "all_attempts": all_attempts,
+                    "final_attempt_index": attempt,
+                    "is_correct": None,
+                    "total_time": time.time() - start_time,
+                }
+            else:
+                if uncertainty < best_score:
+                    best_score = uncertainty
+                    best_attempt = attempt_data
+
+        elif method == "verification":
+            if is_correct:
+                return {
+                    "final_code": generated_code,
+                    "uncertainty_score": None,
+                    "initial_uncertainty": None,
+                    "num_regenerations": attempt,  # Number of regenerations (0 = first attempt succeeded)
+                    "all_attempts": all_attempts,
+                    "final_attempt_index": attempt,
+                    "is_correct": is_correct,
+                    "total_time": time.time() - start_time,
+                }
+
+        # if is_correct and uncertainty is not None and uncertainty <= threshold:
+        #     # Perfect! Both correct and high confidence (low uncertainty)
+        #     total_time = time.time() - start_time
+        #     return {
+        #         "final_code": generated_code,
+        #         "uncertainty_score": uncertainty,
+        #         "initial_uncertainty": (
+        #             all_attempts[0]["uncertainty"] if all_attempts else uncertainty
+        #         ),
+        #         "num_regenerations": attempt,  # Number of regenerations (0 = first attempt succeeded)
+        #         "all_attempts": all_attempts,
+        #         "final_attempt_index": attempt,
+        #         "is_correct": True,
+        #         "total_time": total_time,
+        #     }
 
     # Max attempts reached - return best attempt
-    # Best = correct if available, otherwise lowest uncertainty (highest confidence)
+    # Best = lowest uncertainty (highest confidence)
     total_time = time.time() - start_time
 
-    if best_attempt:
+    if method == "uncertainty":
         return {
             "final_code": best_attempt["code"],
             "uncertainty_score": best_attempt["uncertainty"],
@@ -664,42 +706,37 @@ def correct_code(
                 if all_attempts
                 else best_attempt["uncertainty"]
             ),
-            "num_regenerations": max_attempts - 1,
+            "num_regenerations": max_attempts,
             "all_attempts": all_attempts,
-            "final_attempt_index": (
-                all_attempts.index(best_attempt)
-                if best_attempt in all_attempts
-                else len(all_attempts) - 1
-            ),
+            "final_attempt_index": best_attempt["attempt_index"],
             "is_correct": best_attempt["is_correct"],
             "total_time": total_time,
         }
-
-    # Fallback - return last attempt
-    if all_attempts:
+    else:
+        # return last attempt
         last_attempt = all_attempts[-1]
         return {
             "final_code": last_attempt["code"],
-            "uncertainty_score": last_attempt["uncertainty"],
-            "initial_uncertainty": all_attempts[0]["uncertainty"],
-            "num_regenerations": len(all_attempts) - 1,
+            "uncertainty_score": None,
+            "initial_uncertainty": None,
+            "num_regenerations": max_attempts,
             "all_attempts": all_attempts,
-            "final_attempt_index": len(all_attempts) - 1,
+            "final_attempt_index": max_attempts,
             "is_correct": last_attempt.get("is_correct", False),
             "total_time": total_time,
         }
 
     # Should not reach here
-    return {
-        "final_code": "",
-        "uncertainty_score": 1.0,
-        "initial_uncertainty": 1.0,
-        "num_regenerations": 0,
-        "all_attempts": [],
-        "final_attempt_index": 0,
-        "is_correct": False,
-        "total_time": total_time,
-    }
+    # return {
+    #     "final_code": "",
+    #     "uncertainty_score": 1.0,
+    #     "initial_uncertainty": 1.0,
+    #     "num_regenerations": 0,
+    #     "all_attempts": [],
+    #     "final_attempt_index": 0,
+    #     "is_correct": False,
+    #     "total_time": total_time,
+    # }
 
 
 # ============================================================
@@ -722,12 +759,12 @@ def evaluate_self_correction(
 
     results = {
         "baseline_pass": 0,
-        "corrected_pass": 0,
+        f"{method}_corrected_pass": 0,
         "baseline_latencies": [],
-        "corrected_latencies": [],
-        "uncertainty_reductions": [],
-        "num_corrections": [],
-        "task_results": [],
+        f"{method}_corrected_latencies": [],
+        f"{method}_uncertainty_reductions": [],
+        f"{method}_num_corrections": [],
+        f"{method}_task_results": [],
     }
 
     for task in tqdm(tasks, desc="Evaluating self-correction", unit="task"):
@@ -755,58 +792,88 @@ def evaluate_self_correction(
             tok, model, prompt, test_src, entry_point, sep_probe=sep_probe, cfg=cfg
         )
 
-        if correction_result["is_correct"]:
-            results["corrected_pass"] += 1
-        results["corrected_latencies"].append(correction_result["total_time"])
-        results["uncertainty_reductions"].append(
-            correction_result["initial_uncertainty"]
-            - correction_result["uncertainty_score"]
-        )
-        results["num_corrections"].append(
+        method = cfg.get("correction_method", "uncertainty")
+
+        if method == "verification":
+            corrected_correct = correction_result["is_correct"]
+            if corrected_correct is not None and corrected_correct is True:
+                results[f"{method}_corrected_pass"] += 1
+        else:
+            # it's better to do this here so that the latency measured for uncertainty based self correction is not affected by this verification time
+            code = extract_code(correction_result["final_code"])
+            corrected_correct = evaluate_completion(
+                prompt, test_src, entry_point, code, timeout_s=cfg["test_timeout_s"]
+            )
+            if corrected_correct:
+                results[f"{method}_corrected_pass"] += 1
+
+        results[f"{method}_corrected_latencies"].append(correction_result["total_time"])
+        if method == "uncertainty":
+            results[f"{method}_uncertainty_reductions"].append(
+                correction_result["initial_uncertainty"]
+                - correction_result["uncertainty_score"]
+            )
+        results[f"{method}_num_corrections"].append(
             correction_result.get(
                 "num_regenerations", correction_result.get("num_corrections", 0)
             )
         )
 
-        results["task_results"].append(
+        results[f"{method}_task_results"].append(
             {
                 "task_id": task_id,
                 "baseline_correct": base_correct,
-                "corrected_correct": correction_result["is_correct"],
+                f"{method}_corrected_correct": corrected_correct,
                 "baseline_latency": base_latency,
-                "corrected_latency": correction_result["total_time"],
-                "initial_uncertainty": correction_result["initial_uncertainty"],
-                "final_uncertainty": correction_result["uncertainty_score"],
-                "uncertainty_reduction": correction_result["initial_uncertainty"]
-                - correction_result["uncertainty_score"],
-                "num_corrections": correction_result.get(
+                f"{method}_corrected_latency": correction_result["total_time"],
+                f"{method}_initial_uncertainty": correction_result[
+                    "initial_uncertainty"
+                ],
+                f"{method}_final_uncertainty": correction_result["uncertainty_score"],
+                f"{method}_uncertainty_reduction": (
+                    correction_result["initial_uncertainty"]
+                    - correction_result["uncertainty_score"]
+                    if method == "uncertainty"
+                    else None
+                ),
+                f"{method}_num_corrections": correction_result.get(
                     "num_regenerations", correction_result.get("num_corrections", 0)
                 ),
-                "improved": correction_result["is_correct"] and not base_correct,
-                "degraded": base_correct and not correction_result["is_correct"],
+                "improved": corrected_correct and not base_correct,
+                "degraded": base_correct and not corrected_correct,
             }
         )
 
     # Compute summary statistics
     results["baseline_pass_at_1"] = results["baseline_pass"] / n
-    results["corrected_pass_at_1"] = results["corrected_pass"] / n
-    results["improvement"] = (
-        results["corrected_pass_at_1"] - results["baseline_pass_at_1"]
+    results[f"{method}_corrected_pass_at_1"] = results[f"{method}_corrected_pass"] / n
+    results[f"{method}_improvement"] = (
+        results[f"{method}_corrected_pass_at_1"] - results["baseline_pass_at_1"]
     )
     results["avg_baseline_latency"] = float(np.mean(results["baseline_latencies"]))
-    results["avg_corrected_latency"] = float(np.mean(results["corrected_latencies"]))
-    results["avg_uncertainty_reduction"] = float(
-        np.mean(results["uncertainty_reductions"])
+    results[f"{method}_avg_corrected_latency"] = float(
+        np.mean(results[f"{method}_corrected_latencies"])
     )
-    results["avg_num_corrections"] = float(np.mean(results["num_corrections"]))
+    results[f"{method}_avg_uncertainty_reduction"] = float(
+        np.mean(results[f"{method}_uncertainty_reductions"])
+        if method == "uncertainty"
+        else None
+    )
+    results[f"{method}_avg_num_corrections"] = float(
+        np.mean(results[f"{method}_num_corrections"])
+    )
 
     # Count improvements/degradations
-    results["num_improved"] = sum(1 for r in results["task_results"] if r["improved"])
-    results["num_degraded"] = sum(1 for r in results["task_results"] if r["degraded"])
+    results[f"{method}_num_improved"] = sum(
+        1 for r in results[f"{method}_task_results"] if r["improved"]
+    )
+    results[f"{method}_num_degraded"] = sum(
+        1 for r in results[f"{method}_task_results"] if r["degraded"]
+    )
 
     # DEBUG: Analyze correction behavior
-    avg_corrections = results["avg_num_corrections"]
-    avg_uncertainty_reduction = results["avg_uncertainty_reduction"]
+    avg_corrections = results[f"{method}_avg_num_corrections"]
+    avg_uncertainty_reduction = results[f"{method}_avg_uncertainty_reduction"]
 
     if avg_corrections < 0.1:
         print(
