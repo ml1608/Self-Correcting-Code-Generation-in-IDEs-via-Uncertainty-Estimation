@@ -664,6 +664,7 @@ def evaluate_adaptive_decoding(
         "adaptive_pass": 0,
         "baseline_latencies": [],
         "adaptive_latencies": [],
+        "sequence_adaptive_latencies": [],
         "adaptive_ratio": 0,  # Fraction of steps that used adaptive decoding
         "task_results": [],
     }
@@ -711,6 +712,8 @@ def evaluate_adaptive_decoding(
         else:
             threshold = cfg.get("uncertainty_threshold", 0.5)
 
+        start_time = time.time()
+
         # generate initial solution
         ada_text = generate_one_sample(
             tok,
@@ -729,32 +732,36 @@ def evaluate_adaptive_decoding(
         if uncertainty >= threshold:
             # trigger adaptive decoding
             # let's stick to using token entropy adaptive decoding for now. so the overall generation process uses SEPs for uncertainty estimation on a high level (i.e. semantic level), and mean token entropy on a token level
-            ada_text, ada_len, ada_latency, sequence_ada_ratio = adaptive_decode(
-                tok,
-                model,
-                user_prompt,
-                max_new_tokens=cfg["max_new_tokens"],
-                beam_size=cfg["beam_size"],
-                lookahead_length=cfg["lookahead_length"],
-                token_entropy_threshold=cfg["fallback_token_entropy_threshold"],
+            ada_text, ada_len, sequence_ada_latency, sequence_ada_ratio = (
+                adaptive_decode(
+                    tok,
+                    model,
+                    user_prompt,
+                    max_new_tokens=cfg["max_new_tokens"],
+                    beam_size=cfg["beam_size"],
+                    lookahead_length=cfg["lookahead_length"],
+                    token_entropy_threshold=cfg["fallback_token_entropy_threshold"],
+                )
             )
             adaptive_steps += 1
         else:
             ada_text = ada_text
             ada_len = 0
-            ada_latency = 0
+            sequence_ada_latency = 0
             sequence_ada_ratio = 0
+
+        ada_latency = time.time() - start_time
 
         ada_code = extract_code(ada_text)
 
         ada_correct = evaluate_completion(
-            prompt, test_src, entry_point, ada_text, timeout_s=cfg["test_timeout_s"]
+            prompt, test_src, entry_point, ada_code, timeout_s=cfg["test_timeout_s"]
         )
 
         if ada_correct:
             results["adaptive_pass"] += 1
         results["adaptive_latencies"].append(ada_latency)
-
+        results["sequence_adaptive_latencies"].append(sequence_ada_latency)
         results["task_results"].append(
             {
                 "task_id": task_id,
@@ -776,7 +783,9 @@ def evaluate_adaptive_decoding(
     )
     results["avg_baseline_latency"] = float(np.mean(results["baseline_latencies"]))
     results["avg_adaptive_latency"] = float(np.mean(results["adaptive_latencies"]))
-    # results["avg_adaptive_ratio"] = float(np.mean(results["adaptive_ratios"]))
+    results["avg_sequence_adaptive_latency"] = float(
+        np.mean(results["sequence_adaptive_latencies"])
+    )
 
     # Count improvements/degradations
     results["num_improved"] = sum(1 for r in results["task_results"] if r["improved"])
@@ -911,6 +920,9 @@ def main():
     print(f"Tasks degraded:  {results['num_degraded']}")
     print(f"\nAvg baseline latency: {results['avg_baseline_latency']:.3f}s")
     print(f"Avg adaptive latency:  {results['avg_adaptive_latency']:.3f}s")
+    print(
+        f"Avg sequence adaptive latency:  {results['avg_sequence_adaptive_latency']:.3f}s"
+    )
     print(
         f"Avg adaptive ratio:    {results['avg_adaptive_ratio']:.2%} (fraction of steps using adaptive)"
     )
