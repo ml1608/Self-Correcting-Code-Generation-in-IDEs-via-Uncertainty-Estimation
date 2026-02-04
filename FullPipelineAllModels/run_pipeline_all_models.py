@@ -46,20 +46,25 @@ from self_correction_lambda import (
     get_config as get_correction_config,
 )
 
+from utils import get_probe_path
+
 # ============================================================
 # Configuration
 # ============================================================
 
 # Models to evaluate (from MTEmodels notebook)
+# MODELS = [
+#     ("llama", "3B-Instruct", "meta-llama/Llama-3.2-3B-Instruct"),
+#     ("qwen-coder-instruct", "3B-Instruct", "Qwen/Qwen2.5-Coder-3B-Instruct"),
+#     ("deepseek", "3B-Instruct", "deepseek-ai/deepseek-coder-1.3b-instruct"),
+# ]
 MODELS = [
-    ("llama", "3B-Instruct", "meta-llama/Llama-3.2-3B-Instruct"),
-    ("qwen-coder-instruct", "3B-Instruct", "Qwen/Qwen2.5-Coder-3B-Instruct"),
-    ("deepseek", "3B-Instruct", "deepseek-ai/deepseek-coder-1.3b-instruct"),
+    ("qwen-coder-instruct", "3B-Instruct", "Qwen/Qwen2.5-Coder-3B-Instruct")
 ]
 
 # Feature methods to evaluate
-FEATURE_METHODS = ["SLT", "TBG"]
-
+# FEATURE_METHODS = ["SLT", "TBG"]
+FEATURE_METHODS = ["TBG"]
 # Paths
 SCRIPT_DIR = Path(__file__).parent
 PROBES_DIR = SCRIPT_DIR / "saved_probes"  # Probes are now in this folder
@@ -75,7 +80,7 @@ def get_pipeline_config():
         "split": "test",
         "limit_tasks": None,  # Set to a number for testing, or None for full 164
         # Pipeline steps to run
-        "run_adaptive_decoding": True,  # Run adaptive decoding evaluation
+        "run_adaptive_decoding": False,  # Run adaptive decoding evaluation
         "run_self_correction_with_uncertainty": True,  # Run self-correction with uncertainty evaluation
         "run_self_correction_with_verification": True,  # Run self-correction with verification evaluation
         "skip_if_results_exist": False,  # Don't skip - we want all results
@@ -114,12 +119,12 @@ def load_thresholds_from_csv(csv_path: Path) -> Dict[str, float]:
     return thresholds
 
 
-def get_probe_path(model_id: str, feature_method: str) -> Path:
-    """Get probe path for a given model and feature method."""
-    # Convert model_id to probe directory name format
-    model_name_safe = model_id.replace("/", "_")
-    probe_dir_name = f"{model_name_safe}_{feature_method}_mlp"
-    return PROBES_DIR / probe_dir_name
+# def get_probe_path(model_id: str, feature_method: str) -> Path:
+#     """Get probe path for a given model and feature method."""
+#     # Convert model_id to probe directory name format
+#     model_name_safe = model_id.replace("/", "_")
+#     probe_dir_name = f"{model_name_safe}_{feature_method}_mlp"
+#     return PROBES_DIR / probe_dir_name
 
 
 def load_test_task_ids(split_dir: Path) -> List[str]:
@@ -451,25 +456,25 @@ def generate_comparison(results: Dict[str, Any]) -> Dict[str, Any]:
     if uncertainty_correction:
         comparison["summary"]["uncertainty_self_correction"] = {
             "pass_at_1": uncertainty_correction["uncertainty_corrected_pass_at_1"],
-            "avg_latency": uncertainty_correction["avg_corrected_latency"],
+            "avg_latency": uncertainty_correction["uncertainty_avg_corrected_latency"],
             "improvement": uncertainty_correction["uncertainty_improvement"],
             "avg_uncertainty_reduction": uncertainty_correction[
-                "avg_uncertainty_reduction"
+                "uncertainty_avg_uncertainty_reduction"
             ],
-            "avg_corrections": uncertainty_correction["avg_num_corrections"],
+            "avg_corrections": uncertainty_correction["uncertainty_avg_num_corrections"],
         }
         comparison["method_comparison"].append(
             {
                 "method": "Uncertainty-based Self-Correction",
                 "pass_at_1": uncertainty_correction["uncertainty_corrected_pass_at_1"],
-                "avg_latency": uncertainty_correction["avg_corrected_latency"],
+                "avg_latency": uncertainty_correction["uncertainty_avg_corrected_latency"],
                 "improvement": uncertainty_correction["uncertainty_improvement"],
-                "tasks_improved": uncertainty_correction["num_improved"],
-                "tasks_degraded": uncertainty_correction["num_degraded"],
+                "tasks_improved": uncertainty_correction["uncertainty_num_improved"],
+                "tasks_degraded": uncertainty_correction["uncertainty_num_degraded"],
                 "avg_uncertainty_reduction": uncertainty_correction[
-                    "avg_uncertainty_reduction"
+                    "uncertainty_avg_uncertainty_reduction"
                 ],
-                "avg_corrections": uncertainty_correction["avg_num_corrections"],
+                "avg_corrections": uncertainty_correction["uncertainty_avg_num_corrections"],
             }
         )
         if baseline:
@@ -488,12 +493,9 @@ def generate_comparison(results: Dict[str, Any]) -> Dict[str, Any]:
     if verification_correction:
         comparison["summary"]["verification_self_correction"] = {
             "pass_at_1": verification_correction["verification_corrected_pass_at_1"],
-            "avg_latency": verification_correction["avg_corrected_latency"],
+            "avg_latency": verification_correction["verification_avg_corrected_latency"],
             "improvement": verification_correction["verification_improvement"],
-            "avg_uncertainty_reduction": verification_correction[
-                "avg_uncertainty_reduction"
-            ],
-            "avg_corrections": verification_correction["avg_num_corrections"],
+            "avg_corrections": verification_correction["verification_avg_num_corrections"],
         }
         comparison["method_comparison"].append(
             {
@@ -501,14 +503,11 @@ def generate_comparison(results: Dict[str, Any]) -> Dict[str, Any]:
                 "pass_at_1": verification_correction[
                     "verification_corrected_pass_at_1"
                 ],
-                "avg_latency": verification_correction["avg_corrected_latency"],
+                "avg_latency": verification_correction["verification_avg_corrected_latency"],
                 "improvement": verification_correction["verification_improvement"],
-                "tasks_improved": verification_correction["num_improved"],
-                "tasks_degraded": verification_correction["num_degraded"],
-                "avg_uncertainty_reduction": verification_correction[
-                    "avg_uncertainty_reduction"
-                ],
-                "avg_corrections": verification_correction["avg_num_corrections"],
+                "tasks_improved": verification_correction["verification_num_improved"],
+                "tasks_degraded": verification_correction["verification_num_degraded"],
+                "avg_corrections": verification_correction["verification_avg_num_corrections"],
             }
         )
         if baseline:

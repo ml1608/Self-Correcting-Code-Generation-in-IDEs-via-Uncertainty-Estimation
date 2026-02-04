@@ -1,13 +1,22 @@
 import torch
 from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
-
+import re
+from pathlib import Path
 
 SYSTEM_PROMPT = (
     "You are a Python coding assistant. Complete the function so that it passes the tests. "
     "Return only Python code, no explanation."
 )
+SCRIPT_DIR = Path(__file__).parent
+PROBES_DIR = SCRIPT_DIR / "saved_probes" 
 
+def get_probe_path(model_id: str, feature_method: str) -> Path:
+    """Get probe path for a given model and feature method."""
+    # Convert model_id to probe directory name format
+    model_name_safe = model_id.replace("/", "_")
+    probe_dir_name = f"{model_name_safe}_{feature_method}_mlp"
+    return PROBES_DIR / probe_dir_name
 
 def build_chat_text(tok, user_prompt: str):
     """Build chat-formatted text for Llama."""
@@ -20,6 +29,16 @@ def build_chat_text(tok, user_prompt: str):
             messages, add_generation_prompt=True, tokenize=False
         )
     return f"[SYSTEM] {SYSTEM_PROMPT}\n[USER] {user_prompt}\n[ASSISTANT]\n"
+
+def extract_code(text: str) -> str:
+    """Extract Python code from model output."""
+    blocks = re.findall(
+        r"```(?:python)?\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
+    )
+    code = blocks[-1].strip() if blocks else text.strip()
+    code = re.sub(r"^\s*```(?:python)?\s*", "", code, flags=re.IGNORECASE)
+    code = re.sub(r"\s*```\s*$", "", code)
+    return code
 
 
 @torch.inference_mode()
