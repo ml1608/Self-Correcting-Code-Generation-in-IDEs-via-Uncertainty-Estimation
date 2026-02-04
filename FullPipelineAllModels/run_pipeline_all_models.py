@@ -89,7 +89,7 @@ def get_pipeline_config():
 
 def load_thresholds_from_csv(csv_path: Path) -> Dict[str, float]:
     """Load thresholds from threshold_recommendations.csv.
-    Uses current_recommended field (median threshold) instead of best_threshold.
+    Uses best_threshold field (F1-optimized threshold) instead of current_recommended (median).
     """
     if not csv_path.exists():
         print(f"⚠️  Threshold CSV not found at {csv_path}")
@@ -100,11 +100,11 @@ def load_thresholds_from_csv(csv_path: Path) -> Dict[str, float]:
     
     for _, row in df.iterrows():
         probe_name = row["probe"]
-        # Use current_recommended (median threshold) instead of best_threshold
-        current_recommended = row["current_recommended"]
-        thresholds[probe_name] = float(current_recommended)
+        # Use best_threshold (F1-optimized) instead of current_recommended (median)
+        best_thresh = row["best_threshold"]
+        thresholds[probe_name] = float(best_thresh)
     
-    print(f"✅ Loaded {len(thresholds)} thresholds from CSV (using current_recommended/median thresholds)")
+    print(f"✅ Loaded {len(thresholds)} thresholds from CSV (using best_threshold/F1-optimized thresholds)")
     return thresholds
 
 def get_probe_path(model_id: str, feature_method: str) -> Path:
@@ -202,7 +202,7 @@ def evaluate_on_humaneval_for_model(
     print("-"*80)
     
     baseline_start = time.time()
-    baseline_results = evaluate_baseline(test_tasks, tok, model, cfg)
+    baseline_results = evaluate_baseline(test_tasks, tok, model, cfg, model_id=model_id)
     baseline_time = time.time() - baseline_start
     results["baseline_results"] = baseline_results
     results["baseline_time"] = baseline_time
@@ -269,6 +269,7 @@ def evaluate_baseline(
     tok,
     model,
     cfg: Dict[str, Any],
+    model_id: str = None,  # Add model_id for debugging
 ) -> Dict[str, Any]:
     """Evaluate baseline greedy decoding."""
     results = {
@@ -277,6 +278,9 @@ def evaluate_baseline(
         "latencies": [],
         "task_results": [],
     }
+    
+    # Check if this is DeepSeek for debugging
+    is_deepseek = model_id and "deepseek" in model_id.lower()
     
     for task in tqdm(tasks, desc="Baseline evaluation", unit="task"):
         task_id = task["task_id"]
@@ -289,6 +293,14 @@ def evaluate_baseline(
             tok, model, user_prompt, max_new_tokens=256
         )
         base_code = extract_code(base_text)
+        
+        # DEBUG: For DeepSeek, log first few generations to diagnose issues
+        if is_deepseek and len(results["task_results"]) < 3:
+            print(f"\n  [DEBUG DeepSeek Task {task_id}]")
+            print(f"    Generated text (first 200 chars): {base_text[:200]}...")
+            print(f"    Extracted code (first 200 chars): {base_code[:200]}...")
+            print(f"    Code length: {len(base_code)}")
+        
         base_correct = evaluate_completion(
             prompt, test_src, entry_point, base_code, timeout_s=cfg.get("test_timeout_s", 10)
         )
@@ -300,6 +312,7 @@ def evaluate_baseline(
             "task_id": task_id,
             "correct": base_correct,
             "latency": base_latency,
+            "code_length": len(base_code),  # Add code length for debugging
         })
     
     results["pass_at_1"] = results["pass"] / results["total"]
@@ -480,6 +493,11 @@ def main():
     print("\n" + "="*80)
     print("SUMMARY - ALL MODELS")
     print("="*80)
+    print("\nMethods:")
+    print("  - Baseline: Greedy decoding (temp=0.0)")
+    print("  - Adaptive Decoding: ADADEC-style (TBG probe + lookahead scoring)")
+    print("  - Self-Correction: MTE-style iterative resampling (temp=0.0 then 0.3)")
+    print("="*80)
     
     for result in all_results:
         model_id = result["model_id"]
@@ -490,11 +508,25 @@ def main():
         
         print(f"\n{model_id} ({feature_method}):")
         if baseline:
-            print(f"  Baseline:  {baseline.get('pass_at_1', 0):.4f}")
+            print(f"  Baseline (Greedy):")
+            print(f"    Pass@1:  {baseline.get('pass_at_1', 0):.4f}")
+            print(f"    Latency: {baseline.get('avg_latency', 0):.3f}s")
+        
         if adaptive:
-            print(f"  Adaptive:  {adaptive.get('adaptive_pass_at_1', 0):.4f} ({adaptive.get('improvement', 0):+.4f})")
+            print(f"  Adaptive Decoding (ADADEC):")
+            print(f"    Pass@1:  {adaptive.get('adaptive_pass_at_1', 0):.4f}")
+            print(f"    Improvement: {adaptive.get('improvement', 0):+.4f} ({adaptive.get('improvement', 0)*100:+.2f}%)")
+            print(f"    Latency: {adaptive.get('avg_adaptive_latency', 0):.3f}s")
+            print(f"    Adaptive Ratio: {adaptive.get('avg_adaptive_ratio', 0)*100:.1f}%")
+            print(f"    Tasks Improved: {adaptive.get('num_improved', 0)}")
+        
         if correction:
-            print(f"  Corrected: {correction.get('corrected_pass_at_1', 0):.4f} ({correction.get('improvement', 0):+.4f})")
+            print(f"  Self-Correction (MTE-style Resampling):")
+            print(f"    Pass@1:  {correction.get('corrected_pass_at_1', 0):.4f}")
+            print(f"    Improvement: {correction.get('improvement', 0):+.4f} ({correction.get('improvement', 0)*100:+.2f}%)")
+            print(f"    Latency: {correction.get('avg_corrected_latency', 0):.3f}s")
+            print(f"    Avg Regenerations: {correction.get('avg_num_corrections', 0):.2f}")
+            print(f"    Tasks Improved: {correction.get('num_improved', 0)}")
     
     print("\n" + "="*80)
     print("✅ Pipeline completed!")
