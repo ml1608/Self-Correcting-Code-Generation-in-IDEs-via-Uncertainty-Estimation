@@ -26,7 +26,12 @@ from huggingface_hub.utils import GatedRepoError
 from getpass import getpass
 from tqdm import tqdm
 
-from utils import generate_one_sample, build_chat_text, estimate_uncertainty
+from utils import (
+    generate_one_sample,
+    build_chat_text,
+    estimate_uncertainty,
+    extract_features_multi_method,
+)
 
 # ============================================================
 # Configuration
@@ -162,53 +167,53 @@ def load_sep_probe(
 # ============================================================
 
 
-@torch.inference_mode()
-def extract_features_multi_method(
-    tok,
-    model,
-    full_ids_cpu: torch.Tensor,
-    prompt_len: int,
-    layers: list = [-3, -2, -1],
-    method: str = "SLT",
-):
-    """
-    Extract features using different methods:
-    - SLT: second-to-last token (index -2)
-    - TBG: token before generation (prompt_len - 1)
-    """
-    # Ensure proper shape: [batch_size, seq_len]
-    if full_ids_cpu.dim() == 1:
-        full_ids = full_ids_cpu.unsqueeze(0).to(model.device)
-    else:
-        full_ids = full_ids_cpu.to(model.device)
-    out = model(full_ids, output_hidden_states=True, use_cache=False)
+# @torch.inference_mode()
+# def extract_features_multi_method(
+#     tok,
+#     model,
+#     full_ids_cpu: torch.Tensor,
+#     prompt_len: int,
+#     layers: list = [-3, -2, -1],
+#     method: str = "SLT",
+# ):
+#     """
+#     Extract features using different methods:
+#     - SLT: second-to-last token (index -2)
+#     - TBG: token before generation (prompt_len - 1)
+#     """
+#     # Ensure proper shape: [batch_size, seq_len]
+#     if full_ids_cpu.dim() == 1:
+#         full_ids = full_ids_cpu.unsqueeze(0).to(model.device)
+#     else:
+#         full_ids = full_ids_cpu.to(model.device)
+#     out = model(full_ids, output_hidden_states=True, use_cache=False)
 
-    # Extract features from multiple layers
-    features = []
-    for layer in layers:
-        hs = out.hidden_states[layer]
+#     # Extract features from multiple layers
+#     features = []
+#     for layer in layers:
+#         hs = out.hidden_states[layer]
 
-        if method == "SLT":
-            token_idx = -2
-        elif method == "TBG":
-            token_idx = prompt_len - 1
-        else:
-            raise ValueError(f"Unknown method: {method}")
+#         if method == "SLT":
+#             token_idx = -2
+#         elif method == "TBG":
+#             token_idx = prompt_len - 1
+#         else:
+#             raise ValueError(f"Unknown method: {method}")
 
-        # Handle edge cases
-        if token_idx < 0:
-            token_idx = hs.shape[1] + token_idx
+#         # Handle edge cases
+#         if token_idx < 0:
+#             token_idx = hs.shape[1] + token_idx
 
-        if token_idx >= hs.shape[1]:
-            token_idx = hs.shape[1] - 1
+#         if token_idx >= hs.shape[1]:
+#             token_idx = hs.shape[1] - 1
 
-        if token_idx < 0:
-            token_idx = 0
+#         if token_idx < 0:
+#             token_idx = 0
 
-        features.append(hs[0, token_idx, :].float().detach().cpu().numpy())
+#         features.append(hs[0, token_idx, :].float().detach().cpu().numpy())
 
-    # Concatenate all layer features
-    return np.concatenate(features)
+#     # Concatenate all layer features
+#     return np.concatenate(features)
 
 
 @torch.inference_mode()
@@ -784,6 +789,7 @@ def evaluate_adaptive_decoding(
             adaptive_steps += 1
         else:
             ada_text = ada_text
+            # TODO: return ids from generate_one_sample so we can compute ada_len here
             ada_len = 0
             sequence_ada_latency = 0
             sequence_ada_ratio = 0
