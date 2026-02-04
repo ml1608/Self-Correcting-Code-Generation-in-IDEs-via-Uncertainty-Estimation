@@ -1,4 +1,6 @@
 import torch
+from typing import List, Dict, Any, Tuple, Optional
+import numpy as np
 
 
 SYSTEM_PROMPT = (
@@ -18,6 +20,55 @@ def build_chat_text(tok, user_prompt: str):
             messages, add_generation_prompt=True, tokenize=False
         )
     return f"[SYSTEM] {SYSTEM_PROMPT}\n[USER] {user_prompt}\n[ASSISTANT]\n"
+
+
+@torch.inference_mode()
+def extract_features_multi_method(
+    tok,
+    model,
+    full_ids_cpu: torch.Tensor,
+    prompt_len: int,
+    layers: list = [-3, -2, -1],
+    method: str = "SLT",
+):
+    """
+    Extract features using different methods:
+    - SLT: second-to-last token (index -2)
+    - TBG: token before generation (prompt_len - 1)
+    """
+    # Ensure proper shape: [batch_size, seq_len]
+    if full_ids_cpu.dim() == 1:
+        full_ids = full_ids_cpu.unsqueeze(0).to(model.device)
+    else:
+        full_ids = full_ids_cpu.to(model.device)
+    out = model(full_ids, output_hidden_states=True, use_cache=False)
+
+    # Extract features from multiple layers
+    features = []
+    for layer in layers:
+        hs = out.hidden_states[layer]
+
+        if method == "SLT":
+            token_idx = -2
+        elif method == "TBG":
+            token_idx = prompt_len - 1
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+        # Handle edge cases
+        if token_idx < 0:
+            token_idx = hs.shape[1] + token_idx
+
+        if token_idx >= hs.shape[1]:
+            token_idx = hs.shape[1] - 1
+
+        if token_idx < 0:
+            token_idx = 0
+
+        features.append(hs[0, token_idx, :].float().detach().cpu().numpy())
+
+    # Concatenate all layer features
+    return np.concatenate(features)
 
 
 # ============================================================
@@ -70,19 +121,19 @@ def estimate_uncertainty(
         prompt_len = tok(chat_text, return_tensors="pt").input_ids.shape[1]
         full_ids_cpu = input_ids.detach().cpu()
 
-        if feature_method == "SLT" and _IMPORTED_FUNCTIONS:
-            # Use SLT extraction (backward compatibility)
-            feat = extract_slt_vec_multi_layer(tok, model, full_ids_cpu, layers=layers)
-        else:
-            # Use multi-method extraction (supports both SLT and TBG)
-            feat = extract_features_multi_method(
-                tok,
-                model,
-                full_ids_cpu,
-                prompt_len,
-                layers=layers,
-                method=feature_method,
-            )
+        # if feature_method == "SLT" and _IMPORTED_FUNCTIONS:
+        #     # Use SLT extraction (backward compatibility)
+        #     feat = extract_slt_vec_multi_layer(tok, model, full_ids_cpu, layers=layers)
+        # else:
+        # Use multi-method extraction (supports both SLT and TBG)
+        feat = extract_features_multi_method(
+            tok,
+            model,
+            full_ids_cpu,
+            prompt_len,
+            layers=layers,
+            method=feature_method,
+        )
 
     # Predict uncertainty using SEP probe
     feat_scaled = scaler.transform(feat.reshape(1, -1))
