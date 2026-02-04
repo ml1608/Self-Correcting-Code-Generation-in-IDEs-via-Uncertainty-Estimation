@@ -750,12 +750,28 @@ def evaluate_self_correction(
     model,
     cfg,
     sep_probe: Optional[Tuple] = None,
+    baseline_results: Optional[Dict[str, Any]] = None,
+    baseline_task_by_id: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Evaluate self-correction on HumanEval tasks."""
 
     n = len(tasks)
     if n == 0:
         return {"error": "No tasks provided"}
+
+    method = cfg.get("correction_method", "uncertainty")
+    use_precomputed_baseline = False
+    if baseline_task_by_id is not None:
+        use_precomputed_baseline = True
+    elif baseline_results is not None and baseline_results.get("task_results"):
+        use_precomputed_baseline = True
+        baseline_task_by_id = {
+            task_result["task_id"]: task_result
+            for task_result in baseline_results["task_results"]
+            if "task_id" in task_result
+        }
+    else:
+        baseline_task_by_id = {}
 
     results = {
         "baseline_pass": 0,
@@ -767,32 +783,53 @@ def evaluate_self_correction(
         f"{method}_task_results": [],
     }
 
+    if use_precomputed_baseline:
+        results["baseline_pass"] = baseline_results.get("pass")
+        if results["baseline_pass"] is None:
+            results["baseline_pass"] = sum(
+                1
+                for task_result in baseline_results["task_results"]
+                if task_result.get("correct")
+            )
+        results["baseline_latencies"] = [
+            task_result.get("latency")
+            for task_result in baseline_results["task_results"]
+            if task_result.get("latency") is not None
+        ]
+
     for task in tqdm(tasks, desc="Evaluating self-correction", unit="task"):
         task_id = task["task_id"]
         prompt = task["prompt"]
         test_src = task["test"]
         entry_point = task["entry_point"]
 
-        # Baseline: greedy decode
-        user_prompt = prompt + "\n\n# Your code below:\n"
-        base_text, _, base_latency = greedy_decode(
-            tok, model, user_prompt, max_new_tokens=cfg["max_new_tokens"]
-        )
-        base_code = extract_code(base_text)
-        base_correct = evaluate_completion(
-            prompt, test_src, entry_point, base_code, timeout_s=cfg["test_timeout_s"]
-        )
+        if use_precomputed_baseline and task_id in baseline_task_by_id:
+            baseline_task = baseline_task_by_id[task_id]
+            base_correct = baseline_task.get("correct")
+            base_latency = baseline_task.get("latency")
+        else:
+            # Baseline: greedy decode
+            user_prompt = prompt + "\n\n# Your code below:\n"
+            base_text, _, base_latency = greedy_decode(
+                tok, model, user_prompt, max_new_tokens=cfg["max_new_tokens"]
+            )
+            base_code = extract_code(base_text)
+            base_correct = evaluate_completion(
+                prompt,
+                test_src,
+                entry_point,
+                base_code,
+                timeout_s=cfg["test_timeout_s"],
+            )
 
-        if base_correct:
-            results["baseline_pass"] += 1
-        results["baseline_latencies"].append(base_latency)
+            if base_correct:
+                results["baseline_pass"] += 1
+            results["baseline_latencies"].append(base_latency)
 
         # Self-correction
         correction_result = correct_code(
             tok, model, prompt, test_src, entry_point, sep_probe=sep_probe, cfg=cfg
         )
-
-        method = cfg.get("correction_method", "uncertainty")
 
         if method == "verification":
             corrected_correct = correction_result["is_correct"]

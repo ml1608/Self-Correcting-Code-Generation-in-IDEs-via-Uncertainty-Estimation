@@ -221,6 +221,12 @@ def evaluate_on_humaneval_for_model(
         f"   Time taken: {baseline_time:.1f} seconds ({baseline_time/60:.1f} minutes)"
     )
 
+    baseline_task_by_id = {
+        task_result["task_id"]: task_result
+        for task_result in baseline_results.get("task_results", [])
+        if "task_id" in task_result
+    }
+
     # Adaptive decoding evaluation
     if cfg.get("run_adaptive_decoding", True):
         print("\n" + "-" * 80)
@@ -234,7 +240,13 @@ def evaluate_on_humaneval_for_model(
         adaptive_cfg["use_sep_probe"] = True
 
         adaptive_results = evaluate_adaptive_decoding(
-            test_tasks, tok, model, adaptive_cfg, sep_probe=sep_probe
+            test_tasks,
+            tok,
+            model,
+            adaptive_cfg,
+            sep_probe=sep_probe,
+            baseline_results=baseline_results,
+            baseline_task_by_id=baseline_task_by_id,
         )
         adaptive_time = time.time() - adaptive_start
         results["adaptive_results"] = adaptive_results
@@ -260,7 +272,13 @@ def evaluate_on_humaneval_for_model(
         correction_cfg["correction_method"] = "uncertainty"
 
         correction_results = evaluate_self_correction(
-            test_tasks, tok, model, correction_cfg, sep_probe=sep_probe
+            test_tasks,
+            tok,
+            model,
+            correction_cfg,
+            sep_probe=sep_probe,
+            baseline_results=baseline_results,
+            baseline_task_by_id=baseline_task_by_id,
         )
         correction_time = time.time() - correction_start
         results["uncertainty_correction_results"] = correction_results
@@ -288,7 +306,13 @@ def evaluate_on_humaneval_for_model(
         correction_cfg["correction_method"] = "verification"
 
         correction_results = evaluate_self_correction(
-            test_tasks, tok, model, correction_cfg, sep_probe=sep_probe
+            test_tasks,
+            tok,
+            model,
+            correction_cfg,
+            sep_probe=sep_probe,
+            baseline_results=baseline_results,
+            baseline_task_by_id=baseline_task_by_id,
         )
         correction_time = time.time() - correction_start
         results["verification_correction_results"] = correction_results
