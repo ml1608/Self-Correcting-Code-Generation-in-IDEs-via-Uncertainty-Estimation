@@ -37,14 +37,12 @@ try:
     from adaptive_decoding_lambda import (
         load_sep_probe,
         extract_slt_vec_multi_layer,
-        extract_features_multi_method,
-        build_chat_text,
         greedy_decode,
         adaptive_decode,
-        extract_code,
         evaluate_completion,
         load_model,
     )
+    from utils import generate_one_sample, estimate_uncertainty, get_probe_path, extract_code, build_chat_text, extract_features_multi_method
 
     _IMPORTED_FUNCTIONS = True
 except ImportError:
@@ -70,12 +68,12 @@ def get_config():
         "family": "llama",
         "dataset_name": "openai_humaneval",
         "split": "test",
-        "limit_tasks": None,  # Set to a number for testing, or None for full 164
+        "limit_tasks": 10,  # Set to a number for testing, or None for full 164
         # Self-correction parameters (MTE-style iterative resampling)
         "uncertainty_threshold": None,  # Auto-loaded from probe (None = use probe's recommended threshold)
         "max_regeneration_attempts": 5,  # Maximum regeneration attempts (MTE-style)
         "correction_strategy": "resample",  # Always use resample for MTE-style approach
-        "correction_method": "uncertainty",  # "uncertainty" or "verification"
+        "correction_method": "verification",  # "uncertainty" or "verification"
         # Generation parameters
         "max_new_tokens": 256,
         "resample_temperature": 0.3,  # Temperature for resamples (first uses 0.0, rest use this)
@@ -88,6 +86,7 @@ def get_config():
         # Evaluation
         "test_timeout_s": 10,
         "seed": 42,
+        "feature_method": "SLT",
     }
 
 
@@ -891,11 +890,7 @@ def evaluate_self_correction(
     results[f"{method}_avg_corrected_latency"] = float(
         np.mean(results[f"{method}_corrected_latencies"])
     )
-    results[f"{method}_avg_uncertainty_reduction"] = float(
-        np.mean(results[f"{method}_uncertainty_reductions"])
-        if method == "uncertainty"
-        else None
-    )
+    results[f"{method}_avg_uncertainty_reduction"] = float(np.mean(results[f"{method}_uncertainty_reductions"])) if method == "uncertainty" else None
     results[f"{method}_avg_num_corrections"] = float(
         np.mean(results[f"{method}_num_corrections"])
     )
@@ -912,23 +907,41 @@ def evaluate_self_correction(
     avg_corrections = results[f"{method}_avg_num_corrections"]
     avg_uncertainty_reduction = results[f"{method}_avg_uncertainty_reduction"]
 
-    if avg_corrections < 0.1:
-        print(
-            f"\n⚠️  WARNING: Self-correction rarely triggered (avg corrections: {avg_corrections:.2f})"
-        )
-        print(
-            f"   This suggests the uncertainty threshold ({cfg.get('uncertainty_threshold', 0.5)}) may be too high"
-        )
-        print(f"   Check probe training output for recommended threshold")
+    if method == "uncertainty":
+        if avg_corrections < 0.1:
+            print(
+                f"\n⚠️  WARNING: Self-correction rarely triggered (avg corrections: {avg_corrections:.2f})"
+            )
+            print(
+                f"   This suggests the uncertainty threshold ({cfg.get('uncertainty_threshold', 0.5)}) may be too high"
+            )
+            print(f"   Check probe training output for recommended threshold")
+        if abs(avg_uncertainty_reduction) < 0.01:
+            print(
+                f"\n⚠️  WARNING: Minimal uncertainty reduction ({avg_uncertainty_reduction:.4f})"
+            )
+            print(f"   This may indicate:")
+            print(f"   - Corrections not being applied effectively")
+            print(f"   - Probe predictions not changing after corrections")
+            print(f"   - Threshold too high (corrections never trigger)")
 
-    if abs(avg_uncertainty_reduction) < 0.01:
-        print(
-            f"\n⚠️  WARNING: Minimal uncertainty reduction ({avg_uncertainty_reduction:.4f})"
-        )
-        print(f"   This may indicate:")
-        print(f"   - Corrections not being applied effectively")
-        print(f"   - Probe predictions not changing after corrections")
-        print(f"   - Threshold too high (corrections never trigger)")
+    # if avg_corrections < 0.1:
+    #     print(
+    #         f"\n⚠️  WARNING: Self-correction rarely triggered (avg corrections: {avg_corrections:.2f})"
+    #     )
+    #     print(
+    #         f"   This suggests the uncertainty threshold ({cfg.get('uncertainty_threshold', 0.5)}) may be too high"
+    #     )
+    #     print(f"   Check probe training output for recommended threshold")
+
+    # if abs(avg_uncertainty_reduction) < 0.01:
+    #     print(
+    #         f"\n⚠️  WARNING: Minimal uncertainty reduction ({avg_uncertainty_reduction:.4f})"
+    #     )
+    #     print(f"   This may indicate:")
+    #     print(f"   - Corrections not being applied effectively")
+    #     print(f"   - Probe predictions not changing after corrections")
+    #     print(f"   - Threshold too high (corrections never trigger)")
 
     return results
 
@@ -973,13 +986,15 @@ def main():
         print("[ERROR] Could not load model")
         return
 
+    method = cfg["correction_method"]
+
     # Load SEP probe
     sep_probe = None
     if cfg["use_sep_probe"]:
-        probe_dir = cfg["probe_path"]
-        scaler, clf, threshold = load_sep_probe(probe_dir)
+        probe_dir = get_probe_path(cfg["model_id"], cfg["feature_method"])
+        scaler, clf, threshold, feature_method = load_sep_probe(probe_dir, feature_method=cfg["feature_method"])
         if scaler is not None:
-            sep_probe = (scaler, clf, threshold)
+            sep_probe = (scaler, clf, threshold, feature_method)
             print(f"✅ Using SEP probe from {probe_dir}")
         else:
             print(f"⚠️  SEP probe not found, self-correction will use fallback")
@@ -990,7 +1005,7 @@ def main():
     print("\n" + "=" * 80)
     print("Starting self-correction evaluation...")
     print(f"Uncertainty threshold: {cfg['uncertainty_threshold']}")
-    print(f"Max attempts: {cfg['max_attempts']}")
+    print(f"Max attempts: {cfg['max_regeneration_attempts']}")
     print(f"Correction strategy: {cfg['correction_strategy']}")
     print("=" * 80)
 
@@ -1004,15 +1019,15 @@ def main():
         f"Baseline (Greedy) Pass@1: {results['baseline_pass_at_1']:.4f} ({results['baseline_pass']}/{len(tasks)})"
     )
     print(
-        f"Self-Corrected Pass@1:    {results['corrected_pass_at_1']:.4f} ({results['corrected_pass']}/{len(tasks)})"
+        f"{method} Corrected Pass@1:    {results[f'{method}_corrected_pass_at_1']:.4f} ({results[f'{method}_corrected_pass']}/{len(tasks)})"
     )
-    print(f"Improvement:              {results['improvement']:+.4f}")
-    print(f"\nTasks improved:  {results['num_improved']}")
-    print(f"Tasks degraded:  {results['num_degraded']}")
+    print(f"Improvement:              {results[f'{method}_improvement']:+.4f}")
+    print(f"\nTasks improved:  {results[f'{method}_num_improved']}")
+    print(f"Tasks degraded:  {results[f'{method}_num_degraded']}")
     print(f"\nAvg baseline latency: {results['avg_baseline_latency']:.3f}s")
-    print(f"Avg corrected latency:  {results['avg_corrected_latency']:.3f}s")
-    print(f"Avg uncertainty reduction: {results['avg_uncertainty_reduction']:.4f}")
-    print(f"Avg corrections per task: {results['avg_num_corrections']:.2f}")
+    print(f"Avg corrected latency:  {results[f'{method}_avg_corrected_latency']:.3f}s")
+    # print(f"Avg uncertainty reduction: {results[f'{method}_avg_uncertainty_reduction']:.4f}")
+    print(f"Avg corrections per task: {results[f'{method}_avg_num_corrections']:.2f}")
 
     # Save results
     output_file = "self_correction_results.json"

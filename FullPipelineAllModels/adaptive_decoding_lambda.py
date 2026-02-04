@@ -31,12 +31,14 @@ from utils import (
     build_chat_text,
     estimate_uncertainty,
     extract_features_multi_method,
+    extract_code,
+    get_probe_path,
 )
 
 # ============================================================
 # Configuration
 # ============================================================
-
+ 
 
 def get_config():
     """
@@ -44,11 +46,11 @@ def get_config():
     Uses TBG probe to detect uncertainty early, then uses lookahead scoring.
     """
     return {
-        "model_id": "meta-llama/Llama-3.2-3B-Instruct",
-        "family": "llama",
+        "model_id": "Qwen/Qwen2.5-Coder-3B-Instruct",
+        "family": "qwen",
         "dataset_name": "openai_humaneval",
         "split": "test",
-        "limit_tasks": None,  # Set to a number for testing, or None for full 164
+        "limit_tasks": 10,  # Set to a number for testing, or None for full 164
         # Adaptive decoding parameters (ADADEC-style)
         "max_new_tokens": 256,
         "beam_size": 3,  # Top-K candidates for lookahead (B from ADADEC paper)
@@ -56,12 +58,14 @@ def get_config():
         # SEP probe settings
         "probe_path": "sep_slt_runs/meta-llama_Llama-3.2-3B-Instruct",  # Path to trained probe
         "use_sep_probe": True,  # Use SEP probe to trigger adaptive decoding
+        "uncertainty_threshold": None,  # Auto-loaded from probe (None = use probe's recommended threshold)
         "fallback_token_entropy_threshold": 3.5,  # Fallback if probe not available
         # Feature extraction (must match training config)
         "layers": [-3, -2, -1],
         # Evaluation
         "test_timeout_s": 10,
         "seed": 42,
+        "feature_method": "SLT",
     }
 
 
@@ -592,15 +596,15 @@ def adaptive_decode(
 # ============================================================
 
 
-def extract_code(text: str) -> str:
-    """Extract Python code from model output."""
-    blocks = re.findall(
-        r"```(?:python)?\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
-    )
-    code = blocks[-1].strip() if blocks else text.strip()
-    code = re.sub(r"^\s*```(?:python)?\s*", "", code, flags=re.IGNORECASE)
-    code = re.sub(r"\s*```\s*$", "", code)
-    return code
+# def extract_code(text: str) -> str:
+#     """Extract Python code from model output."""
+#     blocks = re.findall(
+#         r"```(?:python)?\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
+#     )
+#     code = blocks[-1].strip() if blocks else text.strip()
+#     code = re.sub(r"^\s*```(?:python)?\s*", "", code, flags=re.IGNORECASE)
+#     code = re.sub(r"\s*```\s*$", "", code)
+#     return code
 
 
 def _run_test_with_timeout(
@@ -663,6 +667,7 @@ def evaluate_adaptive_decoding(
     """Evaluate adaptive decoding vs greedy baseline on HumanEval."""
 
     n = len(tasks)
+    print(f"Evaluating {n} tasks")
     if n == 0:
         return {"error": "No tasks provided"}
 
@@ -703,6 +708,8 @@ def evaluate_adaptive_decoding(
             if task_result.get("latency") is not None
         ]
 
+    adaptive_steps = 0
+
     for task in tqdm(tasks, desc="Evaluating adaptive decoding", unit="task"):
         task_id = task["task_id"]
         prompt = task["prompt"]
@@ -742,39 +749,60 @@ def evaluate_adaptive_decoding(
             cfg = get_config()
 
         layers = cfg.get("layers", [-3, -2, -1])
-        adaptive_steps = 0
+        
 
         # Auto-load threshold from probe if not set in config
         if cfg["uncertainty_threshold"] is None and sep_probe is not None:
             # sep_probe can be (scaler, clf, threshold) or (scaler, clf, threshold, feature_method)
             if len(sep_probe) == 4:
-                _, _, threshold, _ = sep_probe
+                _, _, threshold, feature_method = sep_probe
             else:
                 _, _, threshold = sep_probe
+                feature_method = cfg.get("feature_method", "SLT")
             print(f"  [INFO] Using probe's recommended threshold: {threshold:.4f}")
         else:
             threshold = cfg.get("uncertainty_threshold", 0.5)
-
+            feature_method = cfg.get("feature_method", "SLT")
+        
         start_time = time.time()
 
-        # generate initial solution
-        ada_text = generate_one_sample(
-            tok,
-            model,
-            prompt,
-            max_new_tokens=cfg["max_new_tokens"],
-            temperature=0.0,
-            top_p=0.95,
-        )
-
         # extract tbg/slt features from initial solution and estimate uncertainty (using sep_probe)
-        uncertainty = estimate_uncertainty(
-            tok, model, prompt, ada_text, sep_probe, layers=[-3, -2, -1]
-        )
+        if feature_method == "TBG":
+            # when using TBG, we don't need to generate initial solution, only generate solution when model is confident
+            initial_code = ""
+            uncertainty = estimate_uncertainty(
+                tok, model, prompt, initial_code, sep_probe, layers=layers
+            )
+            if uncertainty < threshold:
+                ada_code = generate_one_sample(
+                    tok,
+                    model,
+                    prompt,
+                    max_new_tokens=cfg["max_new_tokens"],
+                    temperature=0.0,
+                    top_p=0.95,
+                )
+        else:
+            # generate initial solution
+            ada_code = generate_one_sample(
+                tok,
+                model,
+                prompt,
+                max_new_tokens=cfg["max_new_tokens"],
+                temperature=0.0,
+                top_p=0.95,
+            )
+            uncertainty = estimate_uncertainty(
+                tok, model, prompt, ada_code, sep_probe, layers=layers
+            )
+
+
+        print(f"Uncertainty: {uncertainty:.4f}, Threshold: {threshold:.4f}")
 
         if uncertainty >= threshold:
             # trigger adaptive decoding
             # let's stick to using token entropy adaptive decoding for now. so the overall generation process uses SEPs for uncertainty estimation on a high level (i.e. semantic level), and mean token entropy on a token level
+            print("Triggering adaptive decoding")
             ada_text, ada_len, sequence_ada_latency, sequence_ada_ratio = (
                 adaptive_decode(
                     tok,
@@ -786,17 +814,15 @@ def evaluate_adaptive_decoding(
                     token_entropy_threshold=cfg["fallback_token_entropy_threshold"],
                 )
             )
+            ada_code = extract_code(ada_text)
             adaptive_steps += 1
         else:
-            ada_text = ada_text
             # TODO: return ids from generate_one_sample so we can compute ada_len here
             ada_len = 0
             sequence_ada_latency = 0
             sequence_ada_ratio = 0
 
         ada_latency = time.time() - start_time
-
-        ada_code = extract_code(ada_text)
 
         ada_correct = evaluate_completion(
             prompt, test_src, entry_point, ada_code, timeout_s=cfg["test_timeout_s"]
@@ -930,10 +956,10 @@ def main():
     # Load SEP probe
     sep_probe = None
     if cfg["use_sep_probe"]:
-        probe_dir = cfg["probe_path"]
-        scaler, clf, threshold = load_sep_probe(probe_dir)
+        probe_dir = get_probe_path(cfg["model_id"], cfg["feature_method"])
+        scaler, clf, threshold, feature_method = load_sep_probe(probe_dir, feature_method=cfg["feature_method"])
         if scaler is not None:
-            sep_probe = (scaler, clf, threshold)
+            sep_probe = (scaler, clf, threshold, feature_method)
             print(f"✅ Using SEP probe from {probe_dir}")
         else:
             print(f"⚠️  SEP probe not found, using token entropy fallback")
@@ -968,7 +994,7 @@ def main():
         f"Avg sequence adaptive latency:  {results['avg_sequence_adaptive_latency']:.3f}s"
     )
     print(
-        f"Avg adaptive ratio:    {results['avg_adaptive_ratio']:.2%} (fraction of steps using adaptive)"
+        f"Avg adaptive ratio:    {results['adaptive_ratio']:.2%} (fraction of steps using adaptive)"
     )
 
     # Save results

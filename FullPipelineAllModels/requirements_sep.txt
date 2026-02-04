@@ -4,7 +4,7 @@ datasets==2.20.0
 pandas==2.2.2
 pyarrow<20
 tqdm
-scikit-learn
+scikit-learn==0.23.2
 scipy
 huggingface_hub
 torch
