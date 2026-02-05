@@ -9,4 +9,3 @@ __pycache__/
 *.pyzw
 *.pyzwz
 *_results.json
-pipeline_results_all_models/

@@ -2,16 +2,60 @@ import torch
 from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 import re
+import json
 from pathlib import Path
 
 SYSTEM_PROMPT = (
     # IMPORTANT: This MUST match the system prompt used in train_probes.py
-    # "You are a Python coding assistant. Complete the function so that it passes the tests. "
-    # "Return only Python code, no explanation."
     "You are a strict coding assistant. Output only valid Python code for the function, no explanations."
 )
 SCRIPT_DIR = Path(__file__).parent
-PROBES_DIR = SCRIPT_DIR / "saved_probes" 
+PROBES_DIR = SCRIPT_DIR / "saved_probes"
+ADA_DEC_THRESHOLDS_PATH = SCRIPT_DIR / "ada_dec_thresholds.json"
+
+# Mapping from full model IDs to JSON keys
+MODEL_ID_TO_THRESHOLD_KEY = {
+    "deepseek-ai/deepseek-coder-1.3b-instruct": "deepseek-1.3b",
+    "meta-llama/Llama-3.2-3B-Instruct": "llama3.2-3b",
+    "Qwen/Qwen2.5-Coder-3B-Instruct": "qwen2.5-coder-3b",
+}
+
+def get_token_entropy_threshold(model_id: str, default: float = 0.3) -> float:
+    """
+    Get model-specific token entropy threshold for adaptive decoding.
+    
+    Args:
+        model_id: Full model ID (e.g., "meta-llama/Llama-3.2-3B-Instruct")
+        default: Default threshold if model not found
+        
+    Returns:
+        Token entropy threshold for the model
+    """
+    if not ADA_DEC_THRESHOLDS_PATH.exists():
+        print(f"⚠️  Token entropy thresholds file not found: {ADA_DEC_THRESHOLDS_PATH}")
+        return default
+    
+    try:
+        with open(ADA_DEC_THRESHOLDS_PATH, "r") as f:
+            thresholds = json.load(f)
+        
+        # Get the key for this model
+        threshold_key = MODEL_ID_TO_THRESHOLD_KEY.get(model_id)
+        if threshold_key is None:
+            print(f"⚠️  No threshold mapping for model: {model_id}, using default: {default}")
+            return default
+        
+        if threshold_key not in thresholds:
+            print(f"⚠️  Threshold key '{threshold_key}' not found in JSON, using default: {default}")
+            return default
+        
+        threshold = thresholds[threshold_key]
+        print(f"✅ Loaded token entropy threshold for {model_id}: {threshold}")
+        return threshold
+        
+    except Exception as e:
+        print(f"⚠️  Error loading token entropy thresholds: {e}, using default: {default}")
+        return default
 
 def get_probe_path(model_id: str, feature_method: str) -> Path:
     """Get probe path for a given model and feature method."""
@@ -62,7 +106,7 @@ def extract_features_multi_method(
         full_ids = full_ids_cpu.unsqueeze(0).to(model.device)
     else:
         full_ids = full_ids_cpu.to(model.device)
-    out = model(full_ids, output_hidden_states=True, use_cache=False)
+    out = model(full_ids, output_hidden_states=True, use_cache=True)
 
     # Extract features from multiple layers
     features = []
@@ -234,7 +278,10 @@ def generate_one_sample(
         gen_kwargs["top_p"] = top_p
     else:
         gen_kwargs["do_sample"] = False
-        gen_kwargs["temperature"] = 0.0
+        # Explicitly set neutral values to override model's generation_config defaults
+        # (prevents warnings about temperature/top_p being set with do_sample=False)
+        gen_kwargs["temperature"] = 1.0
+        gen_kwargs["top_p"] = 1.0
 
     out = model.generate(**gen_kwargs)
     full_ids = out[0]

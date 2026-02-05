@@ -65,6 +65,7 @@ def get_config():
     """
     return {
         "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+        # "model_id": "deepseek-ai/deepseek-coder-1.3b-instruct",
         "family": "llama",
         "dataset_name": "openai_humaneval",
         "split": "test",
@@ -168,49 +169,6 @@ if not _IMPORTED_FUNCTIONS:
             features.append(hs[0, token_idx, :].float().detach().cpu().numpy())
         return np.concatenate(features)
 
-    # @torch.inference_mode()
-    # def extract_features_multi_method(
-    #     tok,
-    #     model,
-    #     full_ids_cpu: torch.Tensor,
-    #     prompt_len: int,
-    #     layers: list = [-3, -2, -1],
-    #     method: str = "SLT",
-    # ):
-    #     """Extract features using different methods (SLT or TBG)."""
-    #     full_ids = full_ids_cpu.unsqueeze(0).to(model.device)
-    #     out = model(full_ids, output_hidden_states=True, use_cache=False)
-    #     features = []
-    #     for layer in layers:
-    #         hs = out.hidden_states[layer]
-    #         if method == "SLT":
-    #             token_idx = -2
-    #         elif method == "TBG":
-    #             token_idx = prompt_len - 1
-    #         else:
-    #             raise ValueError(f"Unknown method: {method}")
-
-    #         if token_idx < 0:
-    #             token_idx = hs.shape[1] + token_idx
-    #         if token_idx >= hs.shape[1]:
-    #             token_idx = hs.shape[1] - 1
-    #         if token_idx < 0:
-    #             token_idx = 0
-
-    #         features.append(hs[0, token_idx, :].float().detach().cpu().numpy())
-    #     return np.concatenate(features)
-
-    # def build_chat_text(tok, user_prompt: str):
-    #     """Build chat-formatted text for Llama."""
-    #     messages = [
-    #         {"role": "system", "content": SYSTEM_PROMPT},
-    #         {"role": "user", "content": user_prompt},
-    #     ]
-    #     if getattr(tok, "chat_template", None) not in (None, ""):
-    #         return tok.apply_chat_template(
-    #             messages, add_generation_prompt=True, tokenize=False
-    #         )
-    #     return f"[SYSTEM] {SYSTEM_PROMPT}\n[USER] {user_prompt}\n[ASSISTANT]\n"
 
     @torch.inference_mode()
     def greedy_decode(
@@ -320,16 +278,6 @@ if not _IMPORTED_FUNCTIONS:
             adaptive_ratio,
         )
 
-    # def extract_code(text: str) -> str:
-    #     """Extract Python code from model output."""
-    #     blocks = re.findall(
-    #         r"```(?:python)?\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
-    #     )
-    #     code = blocks[-1].strip() if blocks else text.strip()
-    #     code = re.sub(r"^\s*```(?:python)?\s*", "", code, flags=re.IGNORECASE)
-    #     code = re.sub(r"\s*```\s*$", "", code)
-    #     return code
-
     def _run_test_with_timeout(
         module_src: str, entry_point: str, timeout_seconds: int = 10
     ):
@@ -402,121 +350,6 @@ if not _IMPORTED_FUNCTIONS:
 
 
 # ============================================================
-# Uncertainty Estimation
-# ============================================================
-
-# @torch.inference_mode()
-# def estimate_uncertainty(
-#     tok,
-#     model,
-#     prompt: str,
-#     generated_code: str,
-#     sep_probe: Optional[Tuple] = None,
-#     layers: List[int] = [-3, -2, -1],
-# ) -> float:
-#     """
-#     Estimate uncertainty using SEP probe.
-
-#     Returns:
-#         Probability of high semantic entropy (0-1), higher = more uncertain
-#     """
-#     if sep_probe is None:
-#         return 0.5  # Default uncertainty if probe not available
-
-#     # sep_probe can be (scaler, clf, threshold) or (scaler, clf, threshold, feature_method)
-#     if len(sep_probe) == 4:
-#         scaler, clf, threshold, feature_method = sep_probe
-#     else:
-#         scaler, clf, threshold = sep_probe
-#         feature_method = "SLT"  # Default to SLT for backward compatibility
-
-#     # Reconstruct prompt context
-#     user_prompt = prompt + "\n\n# Your code below:\n"
-#     chat_text = build_chat_text(tok, user_prompt)
-
-#     # Extract features using the specified method
-#     # CRITICAL: TBG must be extracted from prompt ONLY (before generation)
-#     # SLT must be extracted from prompt + generated code (after generation)
-#     if feature_method == "TBG":
-#         # TBG: Extract from prompt only (matches training)
-#         input_ids = tok(chat_text, return_tensors="pt").input_ids.to(model.device)
-#         prompt_len = input_ids.shape[1]
-#         full_ids_cpu = input_ids.detach().cpu()
-#         feat = extract_features_multi_method(
-#             tok, model, full_ids_cpu, prompt_len, layers=layers, method=feature_method
-#         )
-#     else:
-#         # SLT: Extract from prompt + generated code (matches training)
-#         full_text = chat_text + generated_code
-#         input_ids = tok(full_text, return_tensors="pt").input_ids.to(model.device)
-#         prompt_len = tok(chat_text, return_tensors="pt").input_ids.shape[1]
-#         full_ids_cpu = input_ids.detach().cpu()
-
-#         if feature_method == "SLT" and _IMPORTED_FUNCTIONS:
-#             # Use SLT extraction (backward compatibility)
-#             feat = extract_slt_vec_multi_layer(tok, model, full_ids_cpu, layers=layers)
-#         else:
-#             # Use multi-method extraction (supports both SLT and TBG)
-#             feat = extract_features_multi_method(
-#                 tok, model, full_ids_cpu, prompt_len, layers=layers, method=feature_method
-#             )
-
-#     # Predict uncertainty using SEP probe
-#     feat_scaled = scaler.transform(feat.reshape(1, -1))
-#     prob_high_entropy = clf.predict_proba(feat_scaled)[0, 1]  # Probability of high semantic entropy
-
-#     return float(prob_high_entropy)
-
-# ============================================================
-# Correction Strategies
-# ============================================================
-
-# @torch.inference_mode()
-# def generate_one_sample(
-#     tok,
-#     model,
-#     prompt: str,
-#     max_new_tokens: int = 256,
-#     temperature: float = 0.0,
-#     top_p: float = 0.95,
-# ) -> str:
-#     """
-#     Generate a single code sample.
-
-#     Returns:
-#         Generated code string
-#     """
-#     user_prompt = prompt + "\n\n# Your code below:\n"
-#     chat_text = build_chat_text(tok, user_prompt)
-
-#     enc = tok(chat_text, return_tensors="pt").to(model.device)
-
-#     # Build generation kwargs
-#     gen_kwargs = {
-#         **enc,
-#         "max_new_tokens": max_new_tokens,
-#         "num_return_sequences": 1,
-#         "pad_token_id": tok.eos_token_id,
-#         "eos_token_id": tok.eos_token_id,
-#     }
-
-#     # For greedy (temp=0.0), use do_sample=False
-#     # For sampling (temp>0), use do_sample=True with temperature
-#     if temperature > 0.0:
-#         gen_kwargs["do_sample"] = True
-#         gen_kwargs["temperature"] = temperature
-#         gen_kwargs["top_p"] = top_p
-#     else:
-#         gen_kwargs["do_sample"] = False
-
-#     out = model.generate(**gen_kwargs)
-#     gen_ids = out[0][enc["input_ids"].shape[1]:]
-#     gen_text = tok.decode(gen_ids, skip_special_tokens=False)
-#     code = extract_code(gen_text)
-
-#     return code
-
-# ============================================================
 # Main Self-Correction Function
 # ============================================================
 
@@ -559,13 +392,13 @@ def correct_code(
         - is_correct: Whether final code passes tests
         - total_time: Total generation time
     """
+    if cfg is None:
+        cfg = get_config()
+
     method = cfg.get("correction_method", "uncertainty")
     assert method in ["uncertainty", "verification"], ValueError(
         f"Invalid method: {method}. Must be 'uncertainty' or 'verification'."
     )
-
-    if cfg is None:
-        cfg = get_config()
 
     # Auto-load threshold from probe if not set in config
     if cfg["uncertainty_threshold"] is None and sep_probe is not None:
@@ -612,6 +445,7 @@ def correct_code(
                 tok, model, prompt, generated_code, sep_probe, layers=layers,
                 full_ids_cpu=full_ids_cpu, prompt_len=gen_prompt_len,  # Pass actual IDs
             )
+            print(f"  [INFO] Uncertainty: {uncertainty:.4f}")
         elif method == "verification":
             # Verify this sample
             is_correct = evaluate_completion(
@@ -727,18 +561,6 @@ def correct_code(
             "total_time": total_time,
         }
 
-    # Should not reach here
-    # return {
-    #     "final_code": "",
-    #     "uncertainty_score": 1.0,
-    #     "initial_uncertainty": 1.0,
-    #     "num_regenerations": 0,
-    #     "all_attempts": [],
-    #     "final_attempt_index": 0,
-    #     "is_correct": False,
-    #     "total_time": total_time,
-    # }
-
 
 # ============================================================
 # Evaluation Function
@@ -761,6 +583,15 @@ def evaluate_self_correction(
         return {"error": "No tasks provided"}
 
     method = cfg.get("correction_method", "uncertainty")
+
+    if sep_probe is not None:
+        _,_,_,feature_method = sep_probe
+    else:
+        feature_method = cfg.get("feature_method", "SLT")
+
+    if feature_method == "TBG":
+        raise ValueError("TBG feature method is not supported for self-correction")
+
     use_precomputed_baseline = False
     if baseline_task_by_id is not None:
         use_precomputed_baseline = True
@@ -926,24 +757,6 @@ def evaluate_self_correction(
             print(f"   - Corrections not being applied effectively")
             print(f"   - Probe predictions not changing after corrections")
             print(f"   - Threshold too high (corrections never trigger)")
-
-    # if avg_corrections < 0.1:
-    #     print(
-    #         f"\n⚠️  WARNING: Self-correction rarely triggered (avg corrections: {avg_corrections:.2f})"
-    #     )
-    #     print(
-    #         f"   This suggests the uncertainty threshold ({cfg.get('uncertainty_threshold', 0.5)}) may be too high"
-    #     )
-    #     print(f"   Check probe training output for recommended threshold")
-
-    # if abs(avg_uncertainty_reduction) < 0.01:
-    #     print(
-    #         f"\n⚠️  WARNING: Minimal uncertainty reduction ({avg_uncertainty_reduction:.4f})"
-    #     )
-    #     print(f"   This may indicate:")
-    #     print(f"   - Corrections not being applied effectively")
-    #     print(f"   - Probe predictions not changing after corrections")
-    #     print(f"   - Threshold too high (corrections never trigger)")
 
     return results
 

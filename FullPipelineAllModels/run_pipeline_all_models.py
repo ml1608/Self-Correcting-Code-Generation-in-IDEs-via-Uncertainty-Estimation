@@ -46,26 +46,22 @@ from self_correction_lambda import (
     get_config as get_correction_config,
 )
 
-from utils import get_probe_path
+from utils import get_probe_path, get_token_entropy_threshold
 
 # ============================================================
 # Configuration
 # ============================================================
 
 # Models to evaluate (from MTEmodels notebook)
-# MODELS = [
-#     ("llama", "3B-Instruct", "meta-llama/Llama-3.2-3B-Instruct"),
-#     ("qwen-coder-instruct", "3B-Instruct", "Qwen/Qwen2.5-Coder-3B-Instruct"),
-#     ("deepseek", "3B-Instruct", "deepseek-ai/deepseek-coder-1.3b-instruct"),
-# ]
 MODELS = [
-    # ("qwen-coder-instruct", "3B-Instruct", "Qwen/Qwen2.5-Coder-3B-Instruct")
     ("llama", "3B-Instruct", "meta-llama/Llama-3.2-3B-Instruct"),
+    ("qwen-coder-instruct", "3B-Instruct", "Qwen/Qwen2.5-Coder-3B-Instruct"),
+    ("deepseek", "3B-Instruct", "deepseek-ai/deepseek-coder-1.3b-instruct"),
 ]
 
 # Feature methods to evaluate
-# FEATURE_METHODS = ["SLT", "TBG"]
-FEATURE_METHODS = ["TBG"]
+FEATURE_METHODS = ["SLT", "TBG"]
+
 # Paths
 SCRIPT_DIR = Path(__file__).parent
 PROBES_DIR = SCRIPT_DIR / "saved_probes"  # Probes are now in this folder
@@ -118,14 +114,6 @@ def load_thresholds_from_csv(csv_path: Path) -> Dict[str, float]:
         f"✅ Loaded {len(thresholds)} thresholds from CSV (using best_threshold/F1-optimized thresholds)"
     )
     return thresholds
-
-
-# def get_probe_path(model_id: str, feature_method: str) -> Path:
-#     """Get probe path for a given model and feature method."""
-#     # Convert model_id to probe directory name format
-#     model_name_safe = model_id.replace("/", "_")
-#     probe_dir_name = f"{model_name_safe}_{feature_method}_mlp"
-#     return PROBES_DIR / probe_dir_name
 
 
 def load_test_task_ids(split_dir: Path) -> List[str]:
@@ -244,6 +232,8 @@ def evaluate_on_humaneval_for_model(
         adaptive_cfg = get_adaptive_config()
         adaptive_cfg["limit_tasks"] = len(test_tasks)
         adaptive_cfg["use_sep_probe"] = True
+        # Load model-specific token entropy threshold
+        adaptive_cfg["fallback_token_entropy_threshold"] = get_token_entropy_threshold(model_id)
 
         adaptive_results = evaluate_adaptive_decoding(
             test_tasks,
@@ -607,6 +597,14 @@ def main():
 
             threshold = thresholds_dict[probe_name]
 
+            # we can't use TBG feature method for self-correction since the features are extracted from the prompt only and hence would be static and the uncertainty estimation would not change from the initial solution.
+            if feature_method == "TBG":
+                cfg["run_self_correction_with_uncertainty"] = False
+                cfg["run_self_correction_with_verification"] = False
+            else:
+                cfg["run_self_correction_with_uncertainty"] = True
+                cfg["run_self_correction_with_verification"] = True
+
             # Run evaluation
             try:
                 result = evaluate_on_humaneval_for_model(
@@ -655,7 +653,8 @@ def main():
         feature_method = result["feature_method"]
         baseline = result.get("baseline_results", {})
         adaptive = result.get("adaptive_results", {})
-        correction = result.get("correction_results", {})
+        uncertainty_correction = result.get("uncertainty_correction_results", {})
+        verification_correction = result.get("verification_correction_results", {})
 
         print(f"\n{model_id} ({feature_method}):")
         if baseline:
