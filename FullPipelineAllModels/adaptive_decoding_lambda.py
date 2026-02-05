@@ -319,7 +319,7 @@ def greedy_decode(
 
     latency = time.time() - start
     gen_text = tok.decode(
-        output_ids[0][input_ids.shape[1] :], skip_special_tokens=False
+        output_ids[0][input_ids.shape[1] :], skip_special_tokens=True
     )
     return gen_text, (output_ids.shape[1] - input_ids.shape[1]), latency
 

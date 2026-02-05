@@ -11,7 +11,8 @@ SYSTEM_PROMPT = (
 )
 SCRIPT_DIR = Path(__file__).parent
 PROBES_DIR = SCRIPT_DIR / "saved_probes"
-ADA_DEC_THRESHOLDS_PATH = SCRIPT_DIR / "ada_dec_thresholds.json"
+# ADA_DEC_THRESHOLDS_PATH = SCRIPT_DIR / "ada_dec_thresholds.json"
+ADA_DEC_THRESHOLDS_PATH = SCRIPT_DIR / "ada_dec_thresholds_bigcodebench.json"
 
 # Mapping from full model IDs to JSON keys
 MODEL_ID_TO_THRESHOLD_KEY = {

@@ -189,7 +189,7 @@ if not _IMPORTED_FUNCTIONS:
                 break
         latency = time.time() - start
         gen_text = tok.decode(
-            output_ids[0][input_ids.shape[1] :], skip_special_tokens=False
+            output_ids[0][input_ids.shape[1] :], skip_special_tokens=True
         )
         return gen_text, (output_ids.shape[1] - input_ids.shape[1]), latency
 
@@ -268,7 +268,7 @@ if not _IMPORTED_FUNCTIONS:
                 break
         total_time = time.time() - start_time
         generated_text = tok.decode(
-            output_ids[0][input_ids.shape[1] :], skip_special_tokens=False
+            output_ids[0][input_ids.shape[1] :], skip_special_tokens=True
         )
         adaptive_ratio = adaptive_decisions / max(total_decisions, 1)
         return (
