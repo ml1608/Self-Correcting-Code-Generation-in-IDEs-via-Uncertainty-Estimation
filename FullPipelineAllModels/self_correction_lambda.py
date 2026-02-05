@@ -64,8 +64,8 @@ def get_config():
     - Check after each: correct AND uncertainty <= threshold → stop
     """
     return {
-        "model_id": "meta-llama/Llama-3.2-3B-Instruct",
-        # "model_id": "deepseek-ai/deepseek-coder-1.3b-instruct",
+        # "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+        "model_id": "deepseek-ai/deepseek-coder-1.3b-instruct",
         "family": "llama",
         "dataset_name": "openai_humaneval",
         "split": "test",

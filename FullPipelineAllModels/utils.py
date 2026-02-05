@@ -286,7 +286,9 @@ def generate_one_sample(
     out = model.generate(**gen_kwargs)
     full_ids = out[0]
     gen_ids = full_ids[prompt_len:]
-    gen_text = tok.decode(gen_ids, skip_special_tokens=False)
+    # Use skip_special_tokens=True to remove model-specific tokens like <|EOT|> (DeepSeek)
+    # These tokens cause invalid syntax when included in the extracted code
+    gen_text = tok.decode(gen_ids, skip_special_tokens=True)
     code = extract_code(gen_text)
 
     if return_ids:
