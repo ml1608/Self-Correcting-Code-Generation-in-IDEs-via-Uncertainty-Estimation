@@ -59,7 +59,8 @@ from utils import get_probe_path
 #     ("deepseek", "3B-Instruct", "deepseek-ai/deepseek-coder-1.3b-instruct"),
 # ]
 MODELS = [
-    ("qwen-coder-instruct", "3B-Instruct", "Qwen/Qwen2.5-Coder-3B-Instruct")
+    # ("qwen-coder-instruct", "3B-Instruct", "Qwen/Qwen2.5-Coder-3B-Instruct")
+    ("llama", "3B-Instruct", "meta-llama/Llama-3.2-3B-Instruct"),
 ]
 
 # Feature methods to evaluate
@@ -80,7 +81,7 @@ def get_pipeline_config():
         "split": "test",
         "limit_tasks": None,  # Set to a number for testing, or None for full 164
         # Pipeline steps to run
-        "run_adaptive_decoding": False,  # Run adaptive decoding evaluation
+        "run_adaptive_decoding": True,  # Run adaptive decoding evaluation
         "run_self_correction_with_uncertainty": True,  # Run self-correction with uncertainty evaluation
         "run_self_correction_with_verification": True,  # Run self-correction with verification evaluation
         "skip_if_results_exist": False,  # Don't skip - we want all results
