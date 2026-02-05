@@ -278,7 +278,7 @@ def evaluate_on_humaneval_for_model(
         )
         correction_time = time.time() - correction_start
         results["uncertainty_correction_results"] = correction_results
-        results["correction_time"] = correction_time
+        results["uncertainty_correction_time"] = correction_time
         print(
             f"\n✅ Uncertainty-based Self-Corrected Pass@1: {correction_results['uncertainty_corrected_pass_at_1']:.4f}"
         )
@@ -312,7 +312,7 @@ def evaluate_on_humaneval_for_model(
         )
         correction_time = time.time() - correction_start
         results["verification_correction_results"] = correction_results
-        results["correction_time"] = correction_time
+        results["verification_correction_time"] = correction_time
         print(
             f"\n✅ Verification-based Self-Corrected Pass@1: {correction_results['verification_corrected_pass_at_1']:.4f}"
         )
@@ -674,17 +674,26 @@ def main():
             )
             print(f"    Tasks Improved: {adaptive.get('num_improved', 0)}")
 
-        if correction:
+        if uncertainty_correction:
             print(f"  Self-Correction (MTE-style Resampling):")
-            print(f"    Pass@1:  {correction.get('corrected_pass_at_1', 0):.4f}")
+            print(f"    Pass@1:  {uncertainty_correction.get('uncertainty_corrected_pass_at_1', 0):.4f}")
             print(
-                f"    Improvement: {correction.get('improvement', 0):+.4f} ({correction.get('improvement', 0)*100:+.2f}%)"
+                f"    Improvement: {uncertainty_correction.get('uncertainty_improvement', 0):+.4f} ({uncertainty_correction.get('uncertainty_improvement', 0)*100:+.2f}%)"
             )
-            print(f"    Latency: {correction.get('avg_corrected_latency', 0):.3f}s")
+            print(f"    Latency: {uncertainty_correction.get('uncertainty_avg_corrected_latency', 0):.3f}s")
             print(
-                f"    Avg Regenerations: {correction.get('avg_num_corrections', 0):.2f}"
+                f"    Avg Regenerations: {uncertainty_correction.get('uncertainty_avg_num_corrections', 0):.2f}"
             )
-            print(f"    Tasks Improved: {correction.get('num_improved', 0)}")
+            print(f"    Tasks Improved: {uncertainty_correction.get('uncertainty_num_improved', 0)}")
+        
+        if verification_correction:
+            print(f"  Verification-based Self-Correction:")
+            print(f"    Pass@1:  {verification_correction.get('verification_corrected_pass_at_1', 0):.4f}")
+            print(
+                f"    Improvement: {verification_correction.get('verification_improvement', 0):+.4f} ({verification_correction.get('verification_improvement', 0)*100:+.2f}%)"
+            )
+            print(f"    Latency: {verification_correction.get('verification_avg_corrected_latency', 0):.3f}s")
+            print(f"    Tasks Improved: {verification_correction.get('verification_num_improved', 0)}")
 
     print("\n" + "=" * 80)
     print("✅ Pipeline completed!")
