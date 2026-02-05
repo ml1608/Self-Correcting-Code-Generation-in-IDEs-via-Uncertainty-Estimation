@@ -5,8 +5,10 @@ import re
 from pathlib import Path
 
 SYSTEM_PROMPT = (
-    "You are a Python coding assistant. Complete the function so that it passes the tests. "
-    "Return only Python code, no explanation."
+    # IMPORTANT: This MUST match the system prompt used in train_probes.py
+    # "You are a Python coding assistant. Complete the function so that it passes the tests. "
+    # "Return only Python code, no explanation."
+    "You are a strict coding assistant. Output only valid Python code for the function, no explanations."
 )
 SCRIPT_DIR = Path(__file__).parent
 PROBES_DIR = SCRIPT_DIR / "saved_probes" 
@@ -101,9 +103,25 @@ def estimate_uncertainty(
     generated_code: str,
     sep_probe: Optional[Tuple] = None,
     layers: List[int] = [-3, -2, -1],
+    full_ids_cpu: Optional[torch.Tensor] = None,
+    prompt_len: Optional[int] = None,
 ) -> float:
     """
     Estimate uncertainty using SEP probe.
+
+    IMPORTANT: For accurate predictions, pass full_ids_cpu and prompt_len from the actual
+    generation (via generate_one_sample with return_ids=True). If not provided, the function
+    will reconstruct the sequence by tokenizing, which may produce different hidden states.
+
+    Args:
+        tok: Tokenizer
+        model: Language model
+        prompt: The code generation prompt (raw, without "Your code below")
+        generated_code: The generated code (used if full_ids_cpu not provided)
+        sep_probe: (scaler, clf, threshold, feature_method) tuple
+        layers: Layers to extract features from
+        full_ids_cpu: Optional - actual token IDs from generation (CPU tensor)
+        prompt_len: Optional - length of prompt in tokens (required if full_ids_cpu provided)
 
     Returns:
         Probability of high semantic entropy (0-1), higher = more uncertain
@@ -118,41 +136,45 @@ def estimate_uncertainty(
         scaler, clf, threshold = sep_probe
         feature_method = "SLT"  # Default to SLT for backward compatibility
 
-    # Reconstruct prompt context
-    user_prompt = prompt + "\n\n# Your code below:\n"
-    chat_text = build_chat_text(tok, user_prompt)
-
-    # Extract features using the specified method
-    # CRITICAL: TBG must be extracted from prompt ONLY (before generation)
-    # SLT must be extracted from prompt + generated code (after generation)
-    if feature_method == "TBG":
-        # TBG: Extract from prompt only (matches training)
-        input_ids = tok(chat_text, return_tensors="pt").input_ids.to(model.device)
-        prompt_len = input_ids.shape[1]
-        full_ids_cpu = input_ids.detach().cpu()
+    # If actual token IDs are provided, use them (PREFERRED - matches training)
+    if full_ids_cpu is not None and prompt_len is not None:
+        # Use actual generation output - matches training exactly
         feat = extract_features_multi_method(
             tok, model, full_ids_cpu, prompt_len, layers=layers, method=feature_method
         )
     else:
-        # SLT: Extract from prompt + generated code (matches training)
-        full_text = chat_text + generated_code
-        input_ids = tok(full_text, return_tensors="pt").input_ids.to(model.device)
-        prompt_len = tok(chat_text, return_tensors="pt").input_ids.shape[1]
-        full_ids_cpu = input_ids.detach().cpu()
+        # Fallback: reconstruct sequence (may not match training exactly)
+        # This path should be avoided when possible
+        user_prompt = prompt + "\n\n# Your code below:\n"
+        chat_text = build_chat_text(tok, user_prompt)
 
-        # if feature_method == "SLT" and _IMPORTED_FUNCTIONS:
-        #     # Use SLT extraction (backward compatibility)
-        #     feat = extract_slt_vec_multi_layer(tok, model, full_ids_cpu, layers=layers)
-        # else:
-        # Use multi-method extraction (supports both SLT and TBG)
-        feat = extract_features_multi_method(
-            tok,
-            model,
-            full_ids_cpu,
-            prompt_len,
-            layers=layers,
-            method=feature_method,
-        )
+        # Extract features using the specified method
+        # CRITICAL: TBG must be extracted from prompt ONLY (before generation)
+        # SLT must be extracted from prompt + generated code (after generation)
+        if feature_method == "TBG":
+            # TBG: Extract from prompt only (matches training)
+            input_ids = tok(chat_text, return_tensors="pt").input_ids.to(model.device)
+            prompt_len = input_ids.shape[1]
+            full_ids_cpu = input_ids.detach().cpu()
+            feat = extract_features_multi_method(
+                tok, model, full_ids_cpu, prompt_len, layers=layers, method=feature_method
+            )
+        else:
+            # SLT: Extract from prompt + generated code
+            # WARNING: This may not match training exactly due to tokenization differences
+            full_text = chat_text + generated_code
+            input_ids = tok(full_text, return_tensors="pt").input_ids.to(model.device)
+            prompt_len = tok(chat_text, return_tensors="pt").input_ids.shape[1]
+            full_ids_cpu = input_ids.detach().cpu()
+
+            feat = extract_features_multi_method(
+                tok,
+                model,
+                full_ids_cpu,
+                prompt_len,
+                layers=layers,
+                method=feature_method,
+            )
 
     # Predict uncertainty using SEP probe
     feat_scaled = scaler.transform(feat.reshape(1, -1))
@@ -171,17 +193,29 @@ def generate_one_sample(
     max_new_tokens: int = 256,
     temperature: float = 0.0,
     top_p: float = 0.95,
+    return_ids: bool = False,
 ) -> str:
     """
     Generate a single code sample.
 
+    Args:
+        tok: Tokenizer
+        model: Language model
+        prompt: The code generation prompt (raw, without "Your code below")
+        max_new_tokens: Maximum tokens to generate
+        temperature: Sampling temperature (0.0 = greedy)
+        top_p: Nucleus sampling parameter
+        return_ids: If True, return (code, full_ids, prompt_len) tuple
+
     Returns:
-        Generated code string
+        If return_ids=False: Generated code string
+        If return_ids=True: (code, full_ids_cpu, prompt_len) tuple
     """
     user_prompt = prompt + "\n\n# Your code below:\n"
     chat_text = build_chat_text(tok, user_prompt)
 
     enc = tok(chat_text, return_tensors="pt").to(model.device)
+    prompt_len = enc["input_ids"].shape[1]
 
     # Build generation kwargs
     gen_kwargs = {
@@ -200,10 +234,14 @@ def generate_one_sample(
         gen_kwargs["top_p"] = top_p
     else:
         gen_kwargs["do_sample"] = False
+        gen_kwargs["temperature"] = 0.0
 
     out = model.generate(**gen_kwargs)
-    gen_ids = out[0][enc["input_ids"].shape[1] :]
+    full_ids = out[0]
+    gen_ids = full_ids[prompt_len:]
     gen_text = tok.decode(gen_ids, skip_special_tokens=False)
     code = extract_code(gen_text)
 
+    if return_ids:
+        return code, full_ids.detach().cpu(), prompt_len
     return code

@@ -59,7 +59,7 @@ def get_config():
         "probe_path": "sep_slt_runs/meta-llama_Llama-3.2-3B-Instruct",  # Path to trained probe
         "use_sep_probe": True,  # Use SEP probe to trigger adaptive decoding
         "uncertainty_threshold": None,  # Auto-loaded from probe (None = use probe's recommended threshold)
-        "fallback_token_entropy_threshold": 3.5,  # Fallback if probe not available
+        "fallback_token_entropy_threshold": 0.3,  # Fallback if probe not available 
         # Feature extraction (must match training config)
         "layers": [-3, -2, -1],
         # Evaluation
@@ -767,34 +767,56 @@ def evaluate_adaptive_decoding(
         start_time = time.time()
 
         # extract tbg/slt features from initial solution and estimate uncertainty (using sep_probe)
-        if feature_method == "TBG":
-            # when using TBG, we don't need to generate initial solution, only generate solution when model is confident
-            initial_code = ""
-            uncertainty = estimate_uncertainty(
-                tok, model, prompt, initial_code, sep_probe, layers=layers
-            )
-            if uncertainty < threshold:
-                ada_code = generate_one_sample(
-                    tok,
-                    model,
-                    prompt,
-                    max_new_tokens=cfg["max_new_tokens"],
-                    temperature=0.0,
-                    top_p=0.95,
-                )
-        else:
-            # generate initial solution
-            ada_code = generate_one_sample(
-                tok,
-                model,
-                prompt,
-                max_new_tokens=cfg["max_new_tokens"],
-                temperature=0.0,
-                top_p=0.95,
-            )
-            uncertainty = estimate_uncertainty(
-                tok, model, prompt, ada_code, sep_probe, layers=layers
-            )
+        # if feature_method == "TBG":
+        #     # when using TBG, we don't need to generate initial solution, only generate solution when model is confident
+        #     initial_code = ""
+        #     uncertainty = estimate_uncertainty(
+        #         tok, model, prompt, initial_code, sep_probe, layers=layers
+        #     )
+        #     if uncertainty < threshold:
+        #         ada_code = generate_one_sample(
+        #             tok,
+        #             model,
+        #             prompt,
+        #             max_new_tokens=cfg["max_new_tokens"],
+        #             temperature=0.0,
+        #             top_p=0.95,
+        #         )
+        # else:
+        #     # generate initial solution
+        #     ada_code = generate_one_sample(
+        #         tok,
+        #         model,
+        #         prompt,
+        #         max_new_tokens=cfg["max_new_tokens"],
+        #         temperature=0.0,
+        #         top_p=0.95,
+        #     )
+        #     uncertainty = estimate_uncertainty(
+        #         tok, model, prompt, ada_code, sep_probe, layers=layers
+        #     )
+
+        # Extract TBG/SLT features from initial solution and estimate uncertainty (using sep_probe)
+        # IMPORTANT: Generate code with return_ids=True to get actual token IDs
+        # This matches training where features are extracted from actual generation output
+        ada_code, full_ids_cpu, gen_prompt_len = generate_one_sample(
+            tok,
+            model,
+            prompt,
+            max_new_tokens=cfg["max_new_tokens"],
+            temperature=0.0,
+            top_p=0.95,
+            return_ids=True,  # IMPORTANT: Get actual token IDs for accurate uncertainty estimation
+        )
+        
+        # Estimate uncertainty using actual token IDs (matches training)
+        # For TBG: features extracted at prompt_len-1 (last prompt token)
+        # For SLT: features extracted at -2 (second-to-last token of full sequence)
+        uncertainty = estimate_uncertainty(
+            tok, model, prompt, ada_code, sep_probe, layers=layers,
+            full_ids_cpu=full_ids_cpu,  # Full sequence - method determines extraction point
+            prompt_len=gen_prompt_len,
+        )
 
 
         print(f"Uncertainty: {uncertainty:.4f}, Threshold: {threshold:.4f}")

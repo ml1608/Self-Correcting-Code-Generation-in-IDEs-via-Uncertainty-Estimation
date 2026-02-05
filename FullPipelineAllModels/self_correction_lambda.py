@@ -168,49 +168,49 @@ if not _IMPORTED_FUNCTIONS:
             features.append(hs[0, token_idx, :].float().detach().cpu().numpy())
         return np.concatenate(features)
 
-    @torch.inference_mode()
-    def extract_features_multi_method(
-        tok,
-        model,
-        full_ids_cpu: torch.Tensor,
-        prompt_len: int,
-        layers: list = [-3, -2, -1],
-        method: str = "SLT",
-    ):
-        """Extract features using different methods (SLT or TBG)."""
-        full_ids = full_ids_cpu.unsqueeze(0).to(model.device)
-        out = model(full_ids, output_hidden_states=True, use_cache=False)
-        features = []
-        for layer in layers:
-            hs = out.hidden_states[layer]
-            if method == "SLT":
-                token_idx = -2
-            elif method == "TBG":
-                token_idx = prompt_len - 1
-            else:
-                raise ValueError(f"Unknown method: {method}")
+    # @torch.inference_mode()
+    # def extract_features_multi_method(
+    #     tok,
+    #     model,
+    #     full_ids_cpu: torch.Tensor,
+    #     prompt_len: int,
+    #     layers: list = [-3, -2, -1],
+    #     method: str = "SLT",
+    # ):
+    #     """Extract features using different methods (SLT or TBG)."""
+    #     full_ids = full_ids_cpu.unsqueeze(0).to(model.device)
+    #     out = model(full_ids, output_hidden_states=True, use_cache=False)
+    #     features = []
+    #     for layer in layers:
+    #         hs = out.hidden_states[layer]
+    #         if method == "SLT":
+    #             token_idx = -2
+    #         elif method == "TBG":
+    #             token_idx = prompt_len - 1
+    #         else:
+    #             raise ValueError(f"Unknown method: {method}")
 
-            if token_idx < 0:
-                token_idx = hs.shape[1] + token_idx
-            if token_idx >= hs.shape[1]:
-                token_idx = hs.shape[1] - 1
-            if token_idx < 0:
-                token_idx = 0
+    #         if token_idx < 0:
+    #             token_idx = hs.shape[1] + token_idx
+    #         if token_idx >= hs.shape[1]:
+    #             token_idx = hs.shape[1] - 1
+    #         if token_idx < 0:
+    #             token_idx = 0
 
-            features.append(hs[0, token_idx, :].float().detach().cpu().numpy())
-        return np.concatenate(features)
+    #         features.append(hs[0, token_idx, :].float().detach().cpu().numpy())
+    #     return np.concatenate(features)
 
-    def build_chat_text(tok, user_prompt: str):
-        """Build chat-formatted text for Llama."""
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
-        if getattr(tok, "chat_template", None) not in (None, ""):
-            return tok.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False
-            )
-        return f"[SYSTEM] {SYSTEM_PROMPT}\n[USER] {user_prompt}\n[ASSISTANT]\n"
+    # def build_chat_text(tok, user_prompt: str):
+    #     """Build chat-formatted text for Llama."""
+    #     messages = [
+    #         {"role": "system", "content": SYSTEM_PROMPT},
+    #         {"role": "user", "content": user_prompt},
+    #     ]
+    #     if getattr(tok, "chat_template", None) not in (None, ""):
+    #         return tok.apply_chat_template(
+    #             messages, add_generation_prompt=True, tokenize=False
+    #         )
+    #     return f"[SYSTEM] {SYSTEM_PROMPT}\n[USER] {user_prompt}\n[ASSISTANT]\n"
 
     @torch.inference_mode()
     def greedy_decode(
@@ -320,15 +320,15 @@ if not _IMPORTED_FUNCTIONS:
             adaptive_ratio,
         )
 
-    def extract_code(text: str) -> str:
-        """Extract Python code from model output."""
-        blocks = re.findall(
-            r"```(?:python)?\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
-        )
-        code = blocks[-1].strip() if blocks else text.strip()
-        code = re.sub(r"^\s*```(?:python)?\s*", "", code, flags=re.IGNORECASE)
-        code = re.sub(r"\s*```\s*$", "", code)
-        return code
+    # def extract_code(text: str) -> str:
+    #     """Extract Python code from model output."""
+    #     blocks = re.findall(
+    #         r"```(?:python)?\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
+    #     )
+    #     code = blocks[-1].strip() if blocks else text.strip()
+    #     code = re.sub(r"^\s*```(?:python)?\s*", "", code, flags=re.IGNORECASE)
+    #     code = re.sub(r"\s*```\s*$", "", code)
+    #     return code
 
     def _run_test_with_timeout(
         module_src: str, entry_point: str, timeout_seconds: int = 10
@@ -595,20 +595,22 @@ def correct_code(
         # Subsequent attempts: temp=0.3
         current_temp = 0.0 if attempt == 0 else resample_temp
 
-        # Generate one sample
-        generated_code = generate_one_sample(
+        # Generate one sample with actual token IDs for accurate feature extraction
+        generated_code, full_ids_cpu, gen_prompt_len = generate_one_sample(
             tok,
             model,
             prompt,
             max_new_tokens=cfg["max_new_tokens"],
             temperature=current_temp,
             top_p=cfg.get("resample_top_p", 0.95),
+            return_ids=True,  # IMPORTANT: Get actual token IDs
         )
 
         if method == "uncertainty":
-            # Estimate uncertainty for this sample
+            # Estimate uncertainty for this sample using actual token IDs
             uncertainty = estimate_uncertainty(
-                tok, model, prompt, generated_code, sep_probe, layers=layers
+                tok, model, prompt, generated_code, sep_probe, layers=layers,
+                full_ids_cpu=full_ids_cpu, prompt_len=gen_prompt_len,  # Pass actual IDs
             )
         elif method == "verification":
             # Verify this sample
