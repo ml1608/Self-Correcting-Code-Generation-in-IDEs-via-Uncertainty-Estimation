@@ -46,8 +46,13 @@ def get_config():
     Uses TBG probe to detect uncertainty early, then uses lookahead scoring.
     """
     return {
-        "model_id": "Qwen/Qwen2.5-Coder-3B-Instruct",
-        "family": "qwen",
+        # To use DeepSeek: "deepseek-ai/deepseek-coder-1.3b-instruct"
+        # To use Qwen: "Qwen/Qwen2.5-Coder-3B-Instruct"
+        # To use Llama: "meta-llama/Llama-3.2-3B-Instruct"
+        # Set the model_id as needed below:
+        # "model_id": "deepseek-ai/deepseek-coder-1.3b-instruct",
+        "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+        "family": "llama",
         "dataset_name": "openai_humaneval",
         "split": "test",
         "limit_tasks": 10,  # Set to a number for testing, or None for full 164
@@ -65,17 +70,13 @@ def get_config():
         # Evaluation
         "test_timeout_s": 10,
         "seed": 42,
-        "feature_method": "SLT",
+        "feature_method": "TBG",
     }
 
 
 # Alias for compatibility
 get_adaptive_config = get_config
 
-# SYSTEM_PROMPT = (
-#     "You are a Python coding assistant. Complete the function so that it passes the tests. "
-#     "Return only Python code, no explanation."
-# )
 
 # ============================================================
 # Load SEP Probe
@@ -166,60 +167,6 @@ def load_sep_probe(
     return None, None, None, feature_method
 
 
-# ============================================================
-# Feature Extraction (SLT and TBG multi-layer)
-# ============================================================
-
-
-# @torch.inference_mode()
-# def extract_features_multi_method(
-#     tok,
-#     model,
-#     full_ids_cpu: torch.Tensor,
-#     prompt_len: int,
-#     layers: list = [-3, -2, -1],
-#     method: str = "SLT",
-# ):
-#     """
-#     Extract features using different methods:
-#     - SLT: second-to-last token (index -2)
-#     - TBG: token before generation (prompt_len - 1)
-#     """
-#     # Ensure proper shape: [batch_size, seq_len]
-#     if full_ids_cpu.dim() == 1:
-#         full_ids = full_ids_cpu.unsqueeze(0).to(model.device)
-#     else:
-#         full_ids = full_ids_cpu.to(model.device)
-#     out = model(full_ids, output_hidden_states=True, use_cache=False)
-
-#     # Extract features from multiple layers
-#     features = []
-#     for layer in layers:
-#         hs = out.hidden_states[layer]
-
-#         if method == "SLT":
-#             token_idx = -2
-#         elif method == "TBG":
-#             token_idx = prompt_len - 1
-#         else:
-#             raise ValueError(f"Unknown method: {method}")
-
-#         # Handle edge cases
-#         if token_idx < 0:
-#             token_idx = hs.shape[1] + token_idx
-
-#         if token_idx >= hs.shape[1]:
-#             token_idx = hs.shape[1] - 1
-
-#         if token_idx < 0:
-#             token_idx = 0
-
-#         features.append(hs[0, token_idx, :].float().detach().cpu().numpy())
-
-#     # Concatenate all layer features
-#     return np.concatenate(features)
-
-
 @torch.inference_mode()
 def get_next_token_with_features(tok, model, input_ids, layers, prompt_len=None):
     """
@@ -284,7 +231,7 @@ def lookahead_score_token(tok, model, input_ids, candidate_token_id, lookahead_l
     log_probs = []
 
     # Get log-prob of candidate token itself
-    outputs = model(input_ids, use_cache=False)
+    outputs = model(input_ids, use_cache=True)
     logits = outputs.logits[0, -1, :]
     log_prob_dist = torch.log_softmax(logits, dim=0)
     log_probs.append(log_prob_dist[candidate_token_id].item())
@@ -344,19 +291,6 @@ def extract_slt_vec_multi_layer(
         features.append(hs[0, token_idx, :].float().detach().cpu().numpy())
 
     return np.concatenate(features)
-
-
-# def build_chat_text(tok, user_prompt: str):
-#     """Build chat-formatted text for Llama."""
-#     messages = [
-#         {"role": "system", "content": SYSTEM_PROMPT},
-#         {"role": "user", "content": user_prompt},
-#     ]
-#     if getattr(tok, "chat_template", None) not in (None, ""):
-#         return tok.apply_chat_template(
-#             messages, add_generation_prompt=True, tokenize=False
-#         )
-#     return f"[SYSTEM] {SYSTEM_PROMPT}\n[USER] {user_prompt}\n[ASSISTANT]\n"
 
 
 # ============================================================
@@ -532,7 +466,7 @@ def adaptive_decode(
             all_uncertainties.append(uncertainty)
         else:
             # Fallback: use token entropy
-            outputs = model(output_ids, output_hidden_states=True)
+            outputs = model(output_ids, output_hidden_states=True, use_cache=True)
             logits = outputs.logits[:, -1, :]
             probs = torch.nn.functional.softmax(logits, dim=-1)
 
@@ -592,20 +526,8 @@ def adaptive_decode(
 
 
 # ============================================================
-# Code Extraction and Evaluation
+# Code Evaluation
 # ============================================================
-
-
-# def extract_code(text: str) -> str:
-#     """Extract Python code from model output."""
-#     blocks = re.findall(
-#         r"```(?:python)?\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE
-#     )
-#     code = blocks[-1].strip() if blocks else text.strip()
-#     code = re.sub(r"^\s*```(?:python)?\s*", "", code, flags=re.IGNORECASE)
-#     code = re.sub(r"\s*```\s*$", "", code)
-#     return code
-
 
 def _run_test_with_timeout(
     module_src: str, entry_point: str, timeout_seconds: int = 10
@@ -766,83 +688,107 @@ def evaluate_adaptive_decoding(
         
         start_time = time.time()
 
-        # extract tbg/slt features from initial solution and estimate uncertainty (using sep_probe)
-        # if feature_method == "TBG":
-        #     # when using TBG, we don't need to generate initial solution, only generate solution when model is confident
-        #     initial_code = ""
-        #     uncertainty = estimate_uncertainty(
-        #         tok, model, prompt, initial_code, sep_probe, layers=layers
-        #     )
-        #     if uncertainty < threshold:
-        #         ada_code = generate_one_sample(
-        #             tok,
-        #             model,
-        #             prompt,
-        #             max_new_tokens=cfg["max_new_tokens"],
-        #             temperature=0.0,
-        #             top_p=0.95,
-        #         )
-        # else:
-        #     # generate initial solution
-        #     ada_code = generate_one_sample(
-        #         tok,
-        #         model,
-        #         prompt,
-        #         max_new_tokens=cfg["max_new_tokens"],
-        #         temperature=0.0,
-        #         top_p=0.95,
-        #     )
-        #     uncertainty = estimate_uncertainty(
-        #         tok, model, prompt, ada_code, sep_probe, layers=layers
-        #     )
-
-        # Extract TBG/SLT features from initial solution and estimate uncertainty (using sep_probe)
-        # IMPORTANT: Generate code with return_ids=True to get actual token IDs
-        # This matches training where features are extracted from actual generation output
-        ada_code, full_ids_cpu, gen_prompt_len = generate_one_sample(
-            tok,
-            model,
-            prompt,
-            max_new_tokens=cfg["max_new_tokens"],
-            temperature=0.0,
-            top_p=0.95,
-            return_ids=True,  # IMPORTANT: Get actual token IDs for accurate uncertainty estimation
-        )
+        # TBG OPTIMIZATION: For TBG features, we can estimate uncertainty from the prompt BEFORE
+        # generating any code. This saves latency when adaptive decoding is triggered.
+        # For SLT features, we still need to generate code first (features depend on generation).
         
-        # Estimate uncertainty using actual token IDs (matches training)
-        # For TBG: features extracted at prompt_len-1 (last prompt token)
-        # For SLT: features extracted at -2 (second-to-last token of full sequence)
-        uncertainty = estimate_uncertainty(
-            tok, model, prompt, ada_code, sep_probe, layers=layers,
-            full_ids_cpu=full_ids_cpu,  # Full sequence - method determines extraction point
-            prompt_len=gen_prompt_len,
-        )
-
-
-        print(f"Uncertainty: {uncertainty:.4f}, Threshold: {threshold:.4f}")
-
-        if uncertainty >= threshold:
-            # trigger adaptive decoding
-            # let's stick to using token entropy adaptive decoding for now. so the overall generation process uses SEPs for uncertainty estimation on a high level (i.e. semantic level), and mean token entropy on a token level
-            print("Triggering adaptive decoding")
-            ada_text, ada_len, sequence_ada_latency, sequence_ada_ratio = (
-                adaptive_decode(
+        if feature_method == "TBG":
+            # TBG OPTIMIZATION: Generate just 1 token, then extract TBG features
+            # This gives the model a chance to "commit" to a direction while still
+            # being fast enough to save latency when adaptive decoding is triggered
+            _, tbg_ids, tbg_prompt_len = generate_one_sample(
+                tok,
+                model,
+                prompt,
+                max_new_tokens=1,  # Just one token for early uncertainty check
+                temperature=0.0,
+                top_p=0.95,
+                return_ids=True,
+            )
+            
+            # Extract TBG features (from last prompt token, before the generated token)
+            uncertainty = estimate_uncertainty(
+                tok, model, prompt, "",
+                sep_probe, layers=layers,
+                full_ids_cpu=tbg_ids,
+                prompt_len=tbg_prompt_len,
+            )
+            
+            print(f"TBG Uncertainty (1-token): {uncertainty:.4f}, Threshold: {threshold:.4f}")
+            
+            if uncertainty >= threshold:
+                # High uncertainty - trigger adaptive decoding (skip rest of greedy)
+                print("Triggering adaptive decoding (after 1-token check)")
+                ada_text, ada_len, sequence_ada_latency, sequence_ada_ratio = (
+                    adaptive_decode(
+                        tok,
+                        model,
+                        user_prompt,
+                        max_new_tokens=cfg["max_new_tokens"],
+                        beam_size=cfg["beam_size"],
+                        lookahead_length=cfg["lookahead_length"],
+                        token_entropy_threshold=cfg["fallback_token_entropy_threshold"],
+                    )
+                )
+                ada_code = extract_code(ada_text)
+                adaptive_steps += 1
+            else:
+                # Low uncertainty - confident, continue with greedy decoding
+                ada_code = generate_one_sample(
                     tok,
                     model,
-                    user_prompt,
+                    prompt,
                     max_new_tokens=cfg["max_new_tokens"],
-                    beam_size=cfg["beam_size"],
-                    lookahead_length=cfg["lookahead_length"],
-                    token_entropy_threshold=cfg["fallback_token_entropy_threshold"],
+                    temperature=0.0,
+                    top_p=0.95,
+                    return_ids=False,
                 )
-            )
-            ada_code = extract_code(ada_text)
-            adaptive_steps += 1
+                ada_len = 0
+                sequence_ada_latency = 0
+                sequence_ada_ratio = 0
         else:
-            # TODO: return ids from generate_one_sample so we can compute ada_len here
-            ada_len = 0
-            sequence_ada_latency = 0
-            sequence_ada_ratio = 0
+            # SLT: Need to generate code first, then check uncertainty
+            # (SLT features depend on the generated sequence)
+            ada_code, full_ids_cpu, gen_prompt_len = generate_one_sample(
+                tok,
+                model,
+                prompt,
+                max_new_tokens=cfg["max_new_tokens"],
+                temperature=0.0,
+                top_p=0.95,
+                return_ids=True,
+            )
+            
+            # Estimate uncertainty using SLT features (second-to-last token of full sequence)
+            uncertainty = estimate_uncertainty(
+                tok, model, prompt, ada_code, sep_probe, layers=layers,
+                full_ids_cpu=full_ids_cpu,
+                prompt_len=gen_prompt_len,
+            )
+            
+            print(f"SLT Uncertainty: {uncertainty:.4f}, Threshold: {threshold:.4f}")
+
+            if uncertainty >= threshold:
+                # High uncertainty - regenerate with adaptive decoding
+                print("Triggering adaptive decoding")
+                ada_text, ada_len, sequence_ada_latency, sequence_ada_ratio = (
+                    adaptive_decode(
+                        tok,
+                        model,
+                        user_prompt,
+                        max_new_tokens=cfg["max_new_tokens"],
+                        beam_size=cfg["beam_size"],
+                        lookahead_length=cfg["lookahead_length"],
+                        token_entropy_threshold=cfg["fallback_token_entropy_threshold"],
+                    )
+                )
+                ada_code = extract_code(ada_text)
+                adaptive_steps += 1
+            else:
+                # Low uncertainty - keep the greedy result
+                ada_len = 0
+                sequence_ada_latency = 0
+                sequence_ada_ratio = 0
 
         ada_latency = time.time() - start_time
 
