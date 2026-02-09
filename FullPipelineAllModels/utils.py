@@ -5,12 +5,60 @@ import re
 import json
 from pathlib import Path
 
+# ============================================================
+# Dataset Field Mapping
+# ============================================================
+
+def get_task_fields(task: dict, dataset_name: str, prompt_field: str = "instruct_prompt") -> dict:
+    """
+    Map dataset-specific task fields to a standardized format.
+    
+    This helper allows consistent access to task data regardless of whether
+    the source is BigCodeBench or HumanEval.
+    
+    Args:
+        task: The task dictionary from the dataset
+        dataset_name: Name of the dataset (e.g., "bigcode/bigcodebench", "openai_humaneval")
+        prompt_field: Which prompt field to use (for BigCodeBench: "instruct_prompt" or "complete_prompt")
+    
+    Returns:
+        dict with standardized keys: task_id, prompt, test, entry_point, code_prompt, canonical_solution
+    """
+    if "bigcodebench" in dataset_name.lower():
+        # BigCodeBench provides both instruction-only and code prompts.
+        # Use complete_prompt when available to ensure the function signature is present.
+        prompt = task.get(prompt_field, "")
+        if prompt_field == "instruct_prompt" and task.get("complete_prompt"):
+            prompt = task["complete_prompt"]
+        return {
+            "task_id": task["task_id"],
+            "prompt": prompt,
+            "test": task["test"],
+            "entry_point": task["entry_point"],
+            # code_prompt = imports + bare function signature (no docstring).
+            # Used by evaluate_completion's calibrated approach: code_prompt + "\n    pass\n"
+            # is prepended so the function always has a valid body.
+            "code_prompt": task.get("code_prompt", ""),
+            "canonical_solution": task.get("canonical_solution", ""),
+        }
+    else:  # HumanEval or similar
+        return {
+            "task_id": task["task_id"],
+            "prompt": task["prompt"],
+            "test": task["test"],
+            "entry_point": task["entry_point"],
+            "code_prompt": "",
+            "canonical_solution": task.get("canonical_solution", ""),
+        }
+
+
 SYSTEM_PROMPT = (
     # IMPORTANT: This MUST match the system prompt used in train_probes.py
     "You are a strict coding assistant. Output only valid Python code for the function, no explanations."
 )
 SCRIPT_DIR = Path(__file__).parent
 PROBES_DIR = SCRIPT_DIR / "saved_probes"
+PROBES_DIR_BIGCODEBENCH = SCRIPT_DIR.parent / "Dataset+Probes" / "saved_probes" / "bigcodebench"
 ADA_DEC_THRESHOLDS_PATH = SCRIPT_DIR / "ada_dec_thresholds.json"
 
 # Mapping from full model IDs to JSON keys
@@ -57,12 +105,12 @@ def get_token_entropy_threshold(model_id: str, default: float = 0.3) -> float:
         print(f"⚠️  Error loading token entropy thresholds: {e}, using default: {default}")
         return default
 
-def get_probe_path(model_id: str, feature_method: str) -> Path:
+def get_probe_path(model_id: str, feature_method: str, classifier: str) -> Path:
     """Get probe path for a given model and feature method."""
     # Convert model_id to probe directory name format
     model_name_safe = model_id.replace("/", "_")
-    probe_dir_name = f"{model_name_safe}_{feature_method}_mlp"
-    return PROBES_DIR / probe_dir_name
+    probe_dir_name = f"{model_name_safe}_{feature_method}_{classifier}"
+    return PROBES_DIR_BIGCODEBENCH / probe_dir_name
 
 def build_chat_text(tok, user_prompt: str):
     """Build chat-formatted text for Llama."""

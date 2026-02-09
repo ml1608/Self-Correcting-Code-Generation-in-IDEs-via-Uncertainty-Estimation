@@ -165,6 +165,61 @@ def extract_code(text: str) -> str:
         return ""
 
 # ============================================================
+# Dataset normalization + fixed splits
+# ============================================================
+
+def _get_first_present(row: dict, keys):
+    if isinstance(keys, (list, tuple)):
+        for key in keys:
+            val = row.get(key)
+            if val is not None and val != "":
+                return val
+        return None
+    return row.get(keys)
+
+def normalize_task_row(row: dict, field_map: dict) -> dict | None:
+    task_id = _get_first_present(row, field_map.get("task_id"))
+    prompt = _get_first_present(row, field_map.get("prompt"))
+    test_src = _get_first_present(row, field_map.get("test"))
+    entry_point = _get_first_present(row, field_map.get("entry_point"))
+    if not all([task_id, prompt, test_src, entry_point]):
+        return None
+    return {
+        "task_id": task_id,
+        "prompt": prompt,
+        "test": test_src,
+        "entry_point": entry_point,
+    }
+
+def load_or_create_splits(task_ids: list[str], split_dir: Path, seed: int, dataset_name: str):
+    split_dir.mkdir(parents=True, exist_ok=True)
+    train_csv = split_dir / f"{dataset_name}_train_tasks.csv"
+    val_csv = split_dir / f"{dataset_name}_val_tasks.csv"
+    test_csv = split_dir / f"{dataset_name}_test_tasks.csv"
+
+    if train_csv.exists() and val_csv.exists() and test_csv.exists():
+        train_ids = pd.read_csv(train_csv)["task_id"].tolist()
+        val_ids = pd.read_csv(val_csv)["task_id"].tolist()
+        test_ids = pd.read_csv(test_csv)["task_id"].tolist()
+        return {"train": train_ids, "val": val_ids, "test": test_ids}
+
+    rng = random.Random(seed)
+    shuffled = task_ids[:]
+    rng.shuffle(shuffled)
+    n_total = len(shuffled)
+    n_train = int(n_total * 0.70)
+    n_val = int(n_total * 0.15)
+    train_ids = shuffled[:n_train]
+    val_ids = shuffled[n_train:n_train + n_val]
+    test_ids = shuffled[n_train + n_val:]
+
+    pd.DataFrame({"task_id": train_ids}).to_csv(train_csv, index=False)
+    pd.DataFrame({"task_id": val_ids}).to_csv(val_csv, index=False)
+    pd.DataFrame({"task_id": test_ids}).to_csv(test_csv, index=False)
+
+    return {"train": train_ids, "val": val_ids, "test": test_ids}
+
+# ============================================================
 # HumanEval test runner (oracle)
 # ============================================================
 
@@ -821,10 +876,21 @@ def main():
     
     # Load dataset
     ds = load_dataset(cfg["dataset_name"])[cfg["split"]]
-    tasks = [ds[i] for i in range(len(ds))]
-    
+    raw_tasks = [ds[i] for i in range(len(ds))]
+    tasks = []
+    dropped = 0
+    for row in raw_tasks:
+        norm = normalize_task_row(row, cfg["dataset_field_map"])
+        if norm is None:
+            dropped += 1
+            continue
+        tasks.append(norm)
+
+    if dropped:
+        print(f"\n⚠️  Dropped {dropped} tasks missing required fields")
+
     if cfg["limit_tasks"] is None:
-        print(f"\nUsing full HumanEval tasks: {len(tasks)}")
+        print(f"\nUsing full BigCodeBench tasks: {len(tasks)}")
     else:
         print(f"\nUsing limited HumanEval tasks: {cfg['limit_tasks']}")
     

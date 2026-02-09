@@ -1,0 +1,25 @@
+{
+  "model_id": "deepseek-ai/deepseek-coder-1.3b-instruct",
+  "model_family": "deepseek",
+  "feature_method": "SLT",
+  "classifier": "mlp",
+  "test_accuracy": 0.7017543859649122,
+  "test_auc": 0.7458764327648868,
+  "feature_dim": 6144,
+  "layers": [
+    -3,
+    -2,
+    -1
+  ],
+  "n_train": 798,
+  "n_val": 171,
+  "n_test": 171,
+  "semantic_entropy_threshold": 0.0,
+  "recommended_threshold": 0.20932091027498245,
+  "M_samples": 5,
+  "label_mode": "median",
+  "dataset_name": "bigcode/bigcodebench",
+  "dataset_split": "v0.1.4",
+  "prompt_field": "instruct_prompt",
+  "tbg_extraction": "n/a"
+}
