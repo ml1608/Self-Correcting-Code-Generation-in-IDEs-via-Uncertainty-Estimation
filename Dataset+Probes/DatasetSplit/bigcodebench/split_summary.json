@@ -1,0 +1,13 @@
+{
+  "dataset_name": "bigcode/bigcodebench",
+  "dataset_split": "v0.1.4",
+  "prompt_field": "instruct_prompt",
+  "seed": 42,
+  "total_tasks": 1140,
+  "train_count": 798,
+  "val_count": 171,
+  "test_count": 171,
+  "train_ratio": 0.7,
+  "val_ratio": 0.15,
+  "test_ratio": 0.15
+}

@@ -57,7 +57,7 @@ def get_config():
         "split": "test",
         "limit_tasks": 10,  # Set to a number for testing, or None for full 164
         # Adaptive decoding parameters (ADADEC-style)
-        "max_new_tokens": 256,
+        "max_new_tokens": 512,
         "beam_size": 3,  # Top-K candidates for lookahead (B from ADADEC paper)
         "lookahead_length": 5,  # Fixed lookahead length (L from ADADEC paper)
         # SEP probe settings
@@ -300,7 +300,7 @@ def extract_slt_vec_multi_layer(
 
 @torch.inference_mode()
 def greedy_decode(
-    tok, model, prompt: str, max_new_tokens: int = 256
+    tok, model, prompt: str, max_new_tokens: int = 512
 ) -> Tuple[str, int, float]:
     """Standard greedy decoding."""
     chat_text = build_chat_text(tok, prompt)
@@ -532,7 +532,9 @@ def adaptive_decode(
 def _run_test_with_timeout(
     module_src: str, entry_point: str, timeout_seconds: int = 10
 ):
-    """Run HumanEval test with timeout."""
+    """Run test with timeout. Supports HumanEval (check fn) and BigCodeBench (unittest) formats."""
+    import unittest as _unittest
+
     f = io.StringIO()
     use_timeout = hasattr(signal, "SIGALRM") and os.name != "nt"
     old_handler = None
@@ -550,8 +552,39 @@ def _run_test_with_timeout(
         with redirect_stdout(f), redirect_stderr(f):
             glb = {}
             exec(module_src, glb, glb)
-            fn = glb[entry_point]
-            glb["check"](fn)
+
+            if "check" in glb:
+                # HumanEval format: check(candidate) function
+                fn = glb[entry_point]
+                glb["check"](fn)
+            else:
+                # BigCodeBench format: unittest.TestCase classes
+                test_classes = [
+                    v
+                    for v in glb.values()
+                    if isinstance(v, type)
+                    and issubclass(v, _unittest.TestCase)
+                    and v is not _unittest.TestCase
+                ]
+                if test_classes:
+                    suite = _unittest.TestSuite()
+                    loader = _unittest.TestLoader()
+                    for tc in test_classes:
+                        suite.addTests(loader.loadTestsFromTestCase(tc))
+                    runner = _unittest.TextTestRunner(stream=f, verbosity=0)
+                    result = runner.run(suite)
+                    if not result.wasSuccessful():
+                        failures = result.failures + result.errors
+                        msg_parts = [str(f[1])[:200] for f in failures[:3]]
+                        raise AssertionError(
+                            f"{len(result.failures)} failures, "
+                            f"{len(result.errors)} errors: {'; '.join(msg_parts)}"
+                        )
+                else:
+                    # No check function and no test classes
+                    raise RuntimeError(
+                        f"No test method found (no 'check' fn or unittest.TestCase)"
+                    )
         return True, f.getvalue()
     except Exception as e:
         return False, f.getvalue() + "\n" + repr(e)
@@ -561,14 +594,59 @@ def _run_test_with_timeout(
             signal.signal(signal.SIGALRM, old_handler)
 
 
+_eval_debug_count = 0
+
 def evaluate_completion(
-    prompt_src: str, test_src: str, entry_point: str, code: str, timeout_s: int = 10
+    prompt_src: str,
+    test_src: str,
+    entry_point: str,
+    code: str,
+    timeout_s: int = 10,
+    code_prompt: str = "",
 ) -> bool:
-    """Evaluate if generated code passes HumanEval tests."""
+    """
+    Evaluate if generated code passes tests (HumanEval or BigCodeBench).
+
+    Uses BigCodeBench's "calibrated" approach when code_prompt is provided:
+    the solution is prepended with  code_prompt + '\\n    pass\\n'  so the
+    function always has a syntactically-valid body even when the model
+    output redefines or truncates the function.
+
+    Args:
+        prompt_src: The prompt used for generation (complete_prompt for BigCodeBench,
+                    function signature+docstring for HumanEval)
+        test_src:   Test code (unittest.TestCase for BigCodeBench, check(fn) for HumanEval)
+        entry_point: Function name under test
+        code:       Extracted code from the model output
+        timeout_s:  Test execution timeout
+        code_prompt: (BigCodeBench only) imports + bare function signature.
+                     When non-empty, enables calibrated evaluation.
+    """
+    global _eval_debug_count
     if not code:
         return False
-    module_src = prompt_src + "\n" + code + "\n\n" + test_src
-    ok, _ = _run_test_with_timeout(module_src, entry_point, timeout_seconds=timeout_s)
+
+    # Build the solution: prompt_src (complete_prompt) + model output
+    solution = prompt_src + "\n" + code
+
+    # Calibrated approach (from BigCodeBench official evaluator):
+    # Prepend  code_prompt + "\n    pass\n"  so the function always exists
+    # with a valid (pass) body.  If the model output later redefines the
+    # function, the second definition wins.
+    if code_prompt:
+        solution = code_prompt + "\n    pass\n" + solution
+
+    module_src = solution + "\n\n" + test_src
+    ok, output = _run_test_with_timeout(module_src, entry_point, timeout_seconds=timeout_s)
+
+    # Debug: log first few failures to help diagnose issues
+    if not ok and _eval_debug_count < 3:
+        _eval_debug_count += 1
+        print(f"\n  [DEBUG evaluate_completion #{_eval_debug_count}]")
+        print(f"    entry_point: {entry_point}")
+        print(f"    code (first 300 chars): {code[:300]}")
+        print(f"    error output (last 400 chars): {output[-400:]}")
+
     return ok
 
 
@@ -637,6 +715,7 @@ def evaluate_adaptive_decoding(
         prompt = task["prompt"]
         test_src = task["test"]
         entry_point = task["entry_point"]
+        code_prompt = task.get("code_prompt", "")
 
         user_prompt = prompt + "\n\n# Your code below:\n"
 
@@ -656,6 +735,7 @@ def evaluate_adaptive_decoding(
                 entry_point,
                 base_code,
                 timeout_s=cfg["test_timeout_s"],
+                code_prompt=code_prompt,
             )
 
             if base_correct:
@@ -793,7 +873,8 @@ def evaluate_adaptive_decoding(
         ada_latency = time.time() - start_time
 
         ada_correct = evaluate_completion(
-            prompt, test_src, entry_point, ada_code, timeout_s=cfg["test_timeout_s"]
+            prompt, test_src, entry_point, ada_code,
+            timeout_s=cfg["test_timeout_s"], code_prompt=code_prompt,
         )
 
         if ada_correct:

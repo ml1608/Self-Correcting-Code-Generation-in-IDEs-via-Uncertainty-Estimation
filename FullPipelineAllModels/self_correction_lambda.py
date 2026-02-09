@@ -76,7 +76,7 @@ def get_config():
         "correction_strategy": "resample",  # Always use resample for MTE-style approach
         "correction_method": "verification",  # "uncertainty" or "verification"
         # Generation parameters
-        "max_new_tokens": 256,
+        "max_new_tokens": 512,
         "resample_temperature": 0.3,  # Temperature for resamples (first uses 0.0, rest use this)
         "resample_top_p": 0.95,
         # SEP probe settings
@@ -281,7 +281,9 @@ if not _IMPORTED_FUNCTIONS:
     def _run_test_with_timeout(
         module_src: str, entry_point: str, timeout_seconds: int = 10
     ):
-        """Run HumanEval test with timeout."""
+        """Run test with timeout. Supports HumanEval (check fn) and BigCodeBench (unittest) formats."""
+        import unittest as _unittest
+
         f = io.StringIO()
         use_timeout = hasattr(signal, "SIGALRM") and os.name != "nt"
         old_handler = None
@@ -299,8 +301,38 @@ if not _IMPORTED_FUNCTIONS:
             with redirect_stdout(f), redirect_stderr(f):
                 glb = {}
                 exec(module_src, glb, glb)
-                fn = glb[entry_point]
-                glb["check"](fn)
+
+                if "check" in glb:
+                    # HumanEval format: check(candidate) function
+                    fn = glb[entry_point]
+                    glb["check"](fn)
+                else:
+                    # BigCodeBench format: unittest.TestCase classes
+                    test_classes = [
+                        v
+                        for v in glb.values()
+                        if isinstance(v, type)
+                        and issubclass(v, _unittest.TestCase)
+                        and v is not _unittest.TestCase
+                    ]
+                    if test_classes:
+                        suite = _unittest.TestSuite()
+                        loader = _unittest.TestLoader()
+                        for tc in test_classes:
+                            suite.addTests(loader.loadTestsFromTestCase(tc))
+                        runner = _unittest.TextTestRunner(stream=f, verbosity=0)
+                        result = runner.run(suite)
+                        if not result.wasSuccessful():
+                            failures = result.failures + result.errors
+                            msg_parts = [str(f[1])[:200] for f in failures[:3]]
+                            raise AssertionError(
+                                f"{len(result.failures)} failures, "
+                                f"{len(result.errors)} errors: {'; '.join(msg_parts)}"
+                            )
+                    else:
+                        raise RuntimeError(
+                            f"No test method found (no 'check' fn or unittest.TestCase)"
+                        )
             return True, f.getvalue()
         except Exception as e:
             return False, f.getvalue() + "\n" + repr(e)
@@ -310,12 +342,16 @@ if not _IMPORTED_FUNCTIONS:
                 signal.signal(signal.SIGALRM, old_handler)
 
     def evaluate_completion(
-        prompt_src: str, test_src: str, entry_point: str, code: str, timeout_s: int = 10
+        prompt_src: str, test_src: str, entry_point: str, code: str,
+        timeout_s: int = 10, code_prompt: str = "",
     ) -> bool:
-        """Evaluate if generated code passes HumanEval tests."""
+        """Evaluate if generated code passes tests (HumanEval or BigCodeBench)."""
         if not code:
             return False
-        module_src = prompt_src + "\n" + code + "\n\n" + test_src
+        solution = prompt_src + "\n" + code
+        if code_prompt:
+            solution = code_prompt + "\n    pass\n" + solution
+        module_src = solution + "\n\n" + test_src
         ok, _ = _run_test_with_timeout(
             module_src, entry_point, timeout_seconds=timeout_s
         )
@@ -362,6 +398,7 @@ def correct_code(
     entry_point: str,
     sep_probe: Optional[Tuple] = None,
     cfg: Dict[str, Any] = None,
+    code_prompt: str = "",
 ) -> Dict[str, Any]:
     """
     Generate code with MTE-style iterative resampling (self-correction) using uncertainty or verification.
@@ -383,6 +420,7 @@ def correct_code(
         entry_point: Function entry point name
         sep_probe: Trained SEP probe (scaler, clf, threshold, feature_method)
         cfg: Configuration dictionary
+        code_prompt: (BigCodeBench) imports + bare function signature for calibrated eval
     Returns:
         Dictionary with:
         - final_code: Final generated code
@@ -454,6 +492,7 @@ def correct_code(
                 entry_point,
                 generated_code,
                 timeout_s=cfg["test_timeout_s"],
+                code_prompt=code_prompt,
             )
 
         attempt_data = {
@@ -634,6 +673,7 @@ def evaluate_self_correction(
         prompt = task["prompt"]
         test_src = task["test"]
         entry_point = task["entry_point"]
+        code_prompt = task.get("code_prompt", "")
 
         if use_precomputed_baseline and task_id in baseline_task_by_id:
             baseline_task = baseline_task_by_id[task_id]
@@ -652,6 +692,7 @@ def evaluate_self_correction(
                 entry_point,
                 base_code,
                 timeout_s=cfg["test_timeout_s"],
+                code_prompt=code_prompt,
             )
 
             if base_correct:
@@ -660,7 +701,8 @@ def evaluate_self_correction(
 
         # Self-correction
         correction_result = correct_code(
-            tok, model, prompt, test_src, entry_point, sep_probe=sep_probe, cfg=cfg
+            tok, model, prompt, test_src, entry_point,
+            sep_probe=sep_probe, cfg=cfg, code_prompt=code_prompt,
         )
 
         if method == "verification":
@@ -671,7 +713,8 @@ def evaluate_self_correction(
             # it's better to do this here so that the latency measured for uncertainty based self correction is not affected by this verification time
             code = extract_code(correction_result["final_code"])
             corrected_correct = evaluate_completion(
-                prompt, test_src, entry_point, code, timeout_s=cfg["test_timeout_s"]
+                prompt, test_src, entry_point, code,
+                timeout_s=cfg["test_timeout_s"], code_prompt=code_prompt,
             )
             if corrected_correct:
                 results[f"{method}_corrected_pass"] += 1

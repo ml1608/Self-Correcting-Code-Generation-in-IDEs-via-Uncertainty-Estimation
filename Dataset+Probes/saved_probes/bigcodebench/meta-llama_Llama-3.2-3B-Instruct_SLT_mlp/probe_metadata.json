@@ -1,0 +1,25 @@
+{
+  "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+  "model_family": "llama",
+  "feature_method": "SLT",
+  "classifier": "mlp",
+  "test_accuracy": 0.9064327485380117,
+  "test_auc": 0.9256756756756758,
+  "feature_dim": 9216,
+  "layers": [
+    -3,
+    -2,
+    -1
+  ],
+  "n_train": 798,
+  "n_val": 171,
+  "n_test": 171,
+  "semantic_entropy_threshold": 0.0,
+  "recommended_threshold": 0.01125675905495882,
+  "M_samples": 5,
+  "label_mode": "median",
+  "dataset_name": "bigcode/bigcodebench",
+  "dataset_split": "v0.1.4",
+  "prompt_field": "instruct_prompt",
+  "tbg_extraction": "n/a"
+}

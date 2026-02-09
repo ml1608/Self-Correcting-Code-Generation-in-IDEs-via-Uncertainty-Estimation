@@ -22,8 +22,8 @@ import seaborn as sns
 # ============================================================
 
 SCRIPT_DIR = Path(__file__).parent
-THRESHOLD_ANALYSIS_DIR = SCRIPT_DIR / "threshold_analysis"
-OUTPUT_DIR = SCRIPT_DIR / "threshold_analysis_plots"
+THRESHOLD_ANALYSIS_DIR = SCRIPT_DIR / "threshold_analysis" / "bigcodebench"
+OUTPUT_DIR = SCRIPT_DIR / "threshold_analysis_plots" / "bigcodebench"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # Thresholds that were tested
