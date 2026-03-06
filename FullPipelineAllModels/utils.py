@@ -1,8 +1,13 @@
-import torch
-from typing import List, Dict, Any, Tuple, Optional
-import numpy as np
+import io
+import os
 import re
 import json
+import signal
+import hashlib
+import torch
+import numpy as np
+from typing import List, Dict, Any, Tuple, Optional
+from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 
 # ============================================================
@@ -105,12 +110,71 @@ def get_token_entropy_threshold(model_id: str, default: float = 0.3) -> float:
         print(f"⚠️  Error loading token entropy thresholds: {e}, using default: {default}")
         return default
 
-def get_probe_path(model_id: str, feature_method: str, classifier: str) -> Path:
-    """Get probe path for a given model and feature method."""
-    # Convert model_id to probe directory name format
+def get_dataset_safe_name(dataset_name: str) -> str:
+    """Convert a HuggingFace dataset name to a safe directory name."""
+    if "bigcodebench" in dataset_name.lower():
+        return "bigcodebench"
+    if "humaneval" in dataset_name.lower():
+        return "humaneval"
+    return dataset_name.replace("/", "_").replace(":", "_")
+
+
+def get_artifact_paths(dataset_name: str) -> dict:
+    """
+    Return the standard probe/threshold/split paths for a given dataset.
+
+    These paths mirror the layout produced by train_probes.py and thresh_tune.py
+    under Dataset+Probes/.
+    """
+    safe_name = get_dataset_safe_name(dataset_name)
+    dataset_probes_dir = SCRIPT_DIR.parent / "Dataset+Probes"
+    return {
+        "probes_dir": dataset_probes_dir / "saved_probes" / safe_name,
+        "threshold_csv": dataset_probes_dir / "threshold_analysis_plots" / safe_name / "threshold_recommendations.csv",
+        "split_dir": dataset_probes_dir / "DatasetSplit" / safe_name,
+    }
+
+
+def infer_model_family(model_id: str) -> str:
+    """
+    Infer the model family string from a HuggingFace model ID.
+
+    The family string controls chat-template formatting. For unknown models
+    the tokenizer's built-in chat template is used as a fallback.
+    """
+    m = model_id.lower()
+    if "llama" in m:
+        return "llama"
+    if "qwen" in m:
+        return "qwen-coder-instruct"
+    if "deepseek" in m:
+        return "deepseek"
+    if "mistral" in m:
+        return "mistral"
+    if "gemma" in m:
+        return "gemma"
+    if "phi" in m:
+        return "phi"
+    return "unknown"
+
+
+def get_probe_path(model_id: str, feature_method: str, classifier: str,
+                   probes_dir: Path = None) -> Path:
+    """Get probe path for a given model, feature method, and classifier.
+
+    Args:
+        model_id: Full HuggingFace model ID.
+        feature_method: "SLT" or "TBG".
+        classifier: "mlp" or "logreg".
+        probes_dir: Directory containing probe subdirectories.
+                    Defaults to the BigCodeBench probes directory for
+                    backwards compatibility.
+    """
+    if probes_dir is None:
+        probes_dir = PROBES_DIR_BIGCODEBENCH
     model_name_safe = model_id.replace("/", "_")
     probe_dir_name = f"{model_name_safe}_{feature_method}_{classifier}"
-    return PROBES_DIR_BIGCODEBENCH / probe_dir_name
+    return probes_dir / probe_dir_name
 
 def build_chat_text(tok, user_prompt: str):
     """Build chat-formatted text for Llama."""

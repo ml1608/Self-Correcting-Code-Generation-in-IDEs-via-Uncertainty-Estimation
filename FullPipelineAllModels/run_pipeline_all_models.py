@@ -46,56 +46,44 @@ from self_correction_lambda import (
     get_config as get_correction_config,
 )
 
-from utils import get_probe_path, get_token_entropy_threshold, get_task_fields
-
-# ============================================================
-# Configuration
-# ============================================================
-
-# Models to evaluate (from MTEmodels notebook)
-MODELS = [
-    ("llama", "3B-Instruct", "meta-llama/Llama-3.2-3B-Instruct"),
-    ("qwen-coder-instruct", "3B-Instruct", "Qwen/Qwen2.5-Coder-3B-Instruct"),
-    ("deepseek", "3B-Instruct", "deepseek-ai/deepseek-coder-1.3b-instruct"),
-]
-
-# Feature methods to evaluate
-FEATURE_METHODS = ["SLT", "TBG"]
-CLASSIFIERS = ["logreg", "mlp"]
-
-# Paths
-SCRIPT_DIR = Path(__file__).parent
-PROBES_DIR = SCRIPT_DIR / "saved_probes"  # Probes are now in this folder
-THRESHOLD_CSV = (
-    SCRIPT_DIR / "threshold_recommendations.csv"
-)  # Threshold CSV is now in this folder
-DATASET_SPLIT_DIR = SCRIPT_DIR / "DatasetSplit"  # Dataset splits are in this folder
-
-# BigCodeBench artifacts from Dataset+Probes/
-DATASET_PROBES_DIR = SCRIPT_DIR.parent / "Dataset+Probes"
-PROBES_DIR_BIGCODEBENCH = DATASET_PROBES_DIR / "saved_probes" / "bigcodebench"
-THRESHOLD_CSV_BIGCODEBENCH = (
-    DATASET_PROBES_DIR / "threshold_analysis_plots" / "bigcodebench" / "threshold_recommendations.csv"
+from utils import (
+    get_probe_path,
+    get_token_entropy_threshold,
+    get_task_fields,
+    get_artifact_paths,
+    infer_model_family,
 )
-DATASET_SPLIT_DIR_BIGCODEBENCH = DATASET_PROBES_DIR / "DatasetSplit" / "bigcodebench"
+
+# ============================================================
+# Defaults (overridable via CLI)
+# ============================================================
+
+DEFAULT_MODELS = [
+    "meta-llama/Llama-3.2-3B-Instruct",
+    "Qwen/Qwen2.5-Coder-3B-Instruct",
+    "deepseek-ai/deepseek-coder-1.3b-instruct",
+]
+DEFAULT_FEATURE_METHODS = ["SLT", "TBG"]
+DEFAULT_CLASSIFIERS = ["logreg", "mlp"]
+
+SCRIPT_DIR = Path(__file__).parent
 
 
-def get_pipeline_config():
+def get_pipeline_config(args=None):
+    """
+    Build pipeline config from CLI args.  All values can be overridden on the
+    command line; the defaults below match the original BigCodeBench setup.
+    """
     return {
-        # Dataset configuration
-        # For HumanEval: dataset_name="openai_humaneval", split="test", prompt_field="prompt"
-        # For BigCodeBench: dataset_name="bigcode/bigcodebench", split="v0.1.4", prompt_field="instruct_prompt"
-        "dataset_name": "bigcode/bigcodebench",  # Changed to BigCodeBench
-        "split": "v0.1.4",  # BigCodeBench version
-        "prompt_field": "instruct_prompt",  # Which prompt field to use for BigCodeBench
-        "limit_tasks": None,  # Set to a number for testing, or None for full dataset
-        # Pipeline steps to run
-        "run_adaptive_decoding": True,  # Run adaptive decoding evaluation
-        "run_self_correction_with_uncertainty": True,  # Run self-correction with uncertainty evaluation
-        "run_self_correction_with_verification": True,  # Run self-correction with verification evaluation
-        "skip_if_results_exist": False,  # Don't skip - we want all results
-        # Output settings
-        "output_dir": "pipeline_results_all_models",
+        "dataset_name": args.dataset if args and args.dataset else "bigcode/bigcodebench",
+        "split": args.split if args and args.split else "v0.1.4",
+        "prompt_field": args.prompt_field if args and args.prompt_field else "instruct_prompt",
+        "limit_tasks": args.limit_tasks if args else None,
+        "run_adaptive_decoding": True,
+        "run_self_correction_with_uncertainty": True,
+        "run_self_correction_with_verification": True,
+        "skip_if_results_exist": False,
+        "output_dir": args.output_dir if args and args.output_dir else "pipeline_results_all_models",
         "generate_report": True,
         "save_detailed_results": True,
     }
@@ -193,6 +181,7 @@ def evaluate_on_humaneval_for_model(
     cfg: Dict[str, Any],
     hf_token: str,
     classifier: str,
+    probes_dir: Path = None,
 ) -> Dict[str, Any]:
     """
     Evaluate self-correction and adaptive decoding for a single model/feature combination.
@@ -209,7 +198,7 @@ def evaluate_on_humaneval_for_model(
         return {"error": f"Could not load model {model_id}"}
 
     # Load probe
-    probe_dir = get_probe_path(model_id, feature_method, classifier)
+    probe_dir = get_probe_path(model_id, feature_method, classifier, probes_dir=probes_dir)
     print(f"\nLoading probe from: {probe_dir}")
 
     if not probe_dir.exists():
@@ -575,101 +564,161 @@ def generate_comparison(results: Dict[str, Any]) -> Dict[str, Any]:
 # ============================================================
 
 
+def parse_args():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Run the full SEP evaluation pipeline on any dataset and model."
+    )
+    parser.add_argument(
+        "--models", nargs="+", default=None,
+        metavar="MODEL_ID",
+        help="HuggingFace model IDs to evaluate. "
+             f"Defaults to: {DEFAULT_MODELS}",
+    )
+    parser.add_argument(
+        "--dataset", default=None,
+        help="HuggingFace dataset name (e.g. bigcode/bigcodebench or openai_humaneval). "
+             "If omitted, read from split_summary.json in the split directory.",
+    )
+    parser.add_argument(
+        "--split", default=None,
+        help="Dataset split (e.g. v0.1.4 or test). "
+             "If omitted, read from split_summary.json.",
+    )
+    parser.add_argument(
+        "--prompt_field", default=None,
+        help="Field name for the prompt (e.g. instruct_prompt or prompt). "
+             "If omitted, read from split_summary.json.",
+    )
+    parser.add_argument(
+        "--probes_dir", default=None,
+        help="Path to the directory containing saved probe subdirectories. "
+             "Defaults to Dataset+Probes/saved_probes/<dataset_safe_name>/.",
+    )
+    parser.add_argument(
+        "--feature_methods", nargs="+", default=DEFAULT_FEATURE_METHODS,
+        choices=["SLT", "TBG"],
+        help="Feature extraction methods to evaluate.",
+    )
+    parser.add_argument(
+        "--classifiers", nargs="+", default=DEFAULT_CLASSIFIERS,
+        choices=["mlp", "logreg"],
+        help="Probe classifier types to evaluate.",
+    )
+    parser.add_argument(
+        "--limit_tasks", type=int, default=None,
+        help="Limit the number of test tasks (useful for quick runs).",
+    )
+    parser.add_argument(
+        "--output_dir", default="pipeline_results_all_models",
+        help="Directory to write result JSON files.",
+    )
+    return parser.parse_args()
+
+
 def main():
-    """Main pipeline runner for all models."""
+    """Main pipeline runner — supports any dataset and any HuggingFace model."""
+    args = parse_args()
+
     print("=" * 80)
-    print("FULL PIPELINE RUNNER - ALL MODELS")
-    print("=" * 80)
-    print("\nThis pipeline will:")
-    print("  1. Load probes from saved_probes/")
-    print("  2. Load thresholds from threshold_recommendations.csv")
-    print("  3. Use dataset splits from DatasetSplit/")
-    print("  4. Load dataset (BigCodeBench or HumanEval) based on split_summary.json")
-    print("  5. Evaluate baseline, adaptive decoding, and self-correction")
-    print("  6. Generate comprehensive comparison report")
+    print("FULL PIPELINE RUNNER")
     print("=" * 80)
 
-    cfg = get_pipeline_config()
+    cfg = get_pipeline_config(args)
+
+    models = args.models if args.models else DEFAULT_MODELS
+    feature_methods = args.feature_methods
+    classifiers = args.classifiers
 
     # Get HF token
     HF_TOKEN = os.environ.get("HF_TOKEN")
     if not HF_TOKEN:
         print("\nHugging Face login (token is not printed).")
-        HF_TOKEN = getpass(
-            "Paste your Hugging Face token (with Llama access): "
-        ).strip()
+        HF_TOKEN = getpass("Paste your Hugging Face token: ").strip()
         if not HF_TOKEN:
             raise ValueError("Empty HF token. Please paste a valid token.")
 
     login(HF_TOKEN, add_to_git_credential=False)
     print("✅ Logged in successfully!")
 
+    # Resolve artifact paths from the dataset name (or CLI override)
+    # We first try to read from split_summary.json so that the pipeline always
+    # uses the same dataset that the probes were trained on.
+    artifact_paths = get_artifact_paths(cfg["dataset_name"])
+    split_dir = Path(args.probes_dir).parent.parent / "DatasetSplit" / \
+                artifact_paths["split_dir"].name if args.probes_dir else artifact_paths["split_dir"]
+    probes_dir = Path(args.probes_dir) if args.probes_dir else artifact_paths["probes_dir"]
+    threshold_csv = artifact_paths["threshold_csv"]
+
     # Load thresholds
-    print(f"\nLoading thresholds from: {THRESHOLD_CSV_BIGCODEBENCH}")
-    thresholds_dict = load_thresholds_from_csv(THRESHOLD_CSV_BIGCODEBENCH)
+    print(f"\nLoading thresholds from: {threshold_csv}")
+    thresholds_dict = load_thresholds_from_csv(threshold_csv)
 
     # Load dataset splits
-    print(f"\nLoading dataset splits from: {DATASET_SPLIT_DIR_BIGCODEBENCH}")
-    test_task_ids = load_test_task_ids(DATASET_SPLIT_DIR_BIGCODEBENCH)
+    print(f"\nLoading dataset splits from: {split_dir}")
+    test_task_ids = load_test_task_ids(split_dir)
 
-    # Try to load dataset config from split_summary.json (ensures consistency with probe training)
-    print(f"\nLoading dataset configuration...")
-    split_dataset_config = load_dataset_config_from_split(DATASET_SPLIT_DIR_BIGCODEBENCH)
-    
-    # Use split_summary config if available, otherwise fall back to pipeline config
-    if split_dataset_config:
-        dataset_name = split_dataset_config["dataset_name"]
-        dataset_split = split_dataset_config["split"]
-        prompt_field = split_dataset_config["prompt_field"]
-        print(f"   Using dataset config from split_summary.json")
-    else:
-        dataset_name = cfg["dataset_name"]
-        dataset_split = cfg["split"]
-        prompt_field = cfg.get("prompt_field", "prompt")
-        print(f"   Using dataset config from pipeline config")
-    
+    # Determine dataset config — CLI args take priority over split_summary.json
+    print("\nLoading dataset configuration...")
+    split_dataset_config = load_dataset_config_from_split(split_dir)
+    dataset_name = (
+        cfg["dataset_name"]
+        if args.dataset
+        else (split_dataset_config or {}).get("dataset_name", cfg["dataset_name"])
+    )
+    dataset_split = (
+        cfg["split"]
+        if args.split
+        else (split_dataset_config or {}).get("split", cfg["split"])
+    )
+    prompt_field = (
+        cfg["prompt_field"]
+        if args.prompt_field
+        else (split_dataset_config or {}).get("prompt_field", cfg["prompt_field"])
+    )
+    print(f"   Dataset:      {dataset_name}")
+    print(f"   Split:        {dataset_split}")
+    print(f"   Prompt field: {prompt_field}")
+
     print(f"\nLoading dataset: {dataset_name} (split: {dataset_split})")
     ds = load_dataset(dataset_name, split=dataset_split)
-    
-    # Apply field mapping to standardize task fields
-    # This ensures consistent access regardless of HumanEval vs BigCodeBench
-    all_tasks = []
-    for i in range(len(ds)):
-        raw_task = ds[i]
-        # Map fields to standardized format (task_id, prompt, test, entry_point, etc.)
-        mapped_task = get_task_fields(raw_task, dataset_name, prompt_field)
-        all_tasks.append(mapped_task)
-    
+
+    all_tasks = [
+        get_task_fields(ds[i], dataset_name, prompt_field)
+        for i in range(len(ds))
+    ]
     print(f"✅ Loaded {len(all_tasks)} tasks from {dataset_name}")
 
-    # Filter to test set if splits are available
+    # Filter to test split
     if test_task_ids is not None:
         test_tasks = filter_tasks_by_split(all_tasks, test_task_ids)
     else:
-        print("⚠️  Using all tasks (no split filtering)")
+        print("⚠️  No split found — using all tasks")
         test_tasks = all_tasks
-        if cfg.get("limit_tasks") is not None:
-            test_tasks = test_tasks[: cfg["limit_tasks"]]
+
+    if cfg.get("limit_tasks") is not None:
+        test_tasks = test_tasks[: cfg["limit_tasks"]]
+        print(f"   Limited to {len(test_tasks)} tasks")
 
     # Store all results
     all_results = []
 
-    # Run pipeline for each model and feature method
-    for model_family, size_bucket, model_id in MODELS:
-        for feature_method in FEATURE_METHODS:
-            for classifier in CLASSIFIERS:  
-                # Get probe name for threshold lookup
+    for model_id in models:
+        model_family = infer_model_family(model_id)
+        for feature_method in feature_methods:
+            for classifier in classifiers:
                 model_name_safe = model_id.replace("/", "_")
                 probe_name = f"{model_name_safe}_{feature_method}_{classifier}"
 
-                # Get threshold
                 if probe_name not in thresholds_dict:
                     print(f"\n⚠️  No threshold found for {probe_name}, skipping...")
                     continue
 
                 threshold = thresholds_dict[probe_name]
 
-                # we can't use TBG feature method for self-correction since the features are extracted from the prompt only and hence would be static and the uncertainty estimation would not change from the initial solution.
+                # TBG features are extracted from the prompt alone and are static
+                # per task, so they cannot drive self-correction (the signal never
+                # changes between attempts).
                 if feature_method == "TBG":
                     cfg["run_self_correction_with_uncertainty"] = False
                     cfg["run_self_correction_with_verification"] = False
@@ -677,25 +726,23 @@ def main():
                     cfg["run_self_correction_with_uncertainty"] = True
                     cfg["run_self_correction_with_verification"] = True
 
-                # Run evaluation
                 try:
                     result = evaluate_on_humaneval_for_model(
                         model_id=model_id,
                         model_family=model_family,
                         feature_method=feature_method,
                         threshold=threshold,
-                        test_tasks=test_tasks[:10],
+                        test_tasks=test_tasks,
                         cfg=cfg,
                         hf_token=HF_TOKEN,
                         classifier=classifier,
+                        probes_dir=probes_dir,
                     )
-
                     if "error" not in result:
                         all_results.append(result)
                 except Exception as e:
                     print(f"\n❌ Error evaluating {model_id} with {feature_method}: {e}")
                     import traceback
-
                     traceback.print_exc()
                     continue
 

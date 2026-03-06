@@ -1,0 +1,3 @@
+[submodule "FullPipelineAllModels/AdaDec"]
+	path = FullPipelineAllModels/AdaDec
+	url = https://github.com/SYSUSELab/AdaDec
