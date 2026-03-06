@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """
-Adaptive Decoding using SEP Probe
-Uses trained Semantic Entropy Probe to predict high semantic entropy
-and triggers adaptive decoding (beam search with lookahead) when needed.
+Adaptive Decoding using AdaDec + SEP Probe
+
+The SEP probe gates adaptive decoding at the task level (should we bother for
+this problem?).  When triggered, the actual token-by-token generation is
+handled by AdaDec's Generator (AdaFixL mode), which uses Shannon entropy of
+the next-token distribution at each step to decide between greedy selection
+and lookahead-based reranking.
+
+AdaDec submodule: FullPipelineAllModels/AdaDec
+Paper: https://arxiv.org/abs/2506.08980
 """
 
 import os
+import sys
 import re
 import io
 import json
 import time
-import math
 import signal
 import pickle
 import numpy as np
@@ -20,7 +27,6 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier
 from huggingface_hub import login
 from huggingface_hub.utils import GatedRepoError
 from getpass import getpass
@@ -34,6 +40,21 @@ from utils import (
     extract_code,
     get_probe_path,
 )
+
+# ── AdaDec submodule import ───────────────────────────────────────────────────
+_ADADEC_PATH = os.path.join(os.path.dirname(__file__), "AdaDec")
+if os.path.isdir(_ADADEC_PATH) and _ADADEC_PATH not in sys.path:
+    sys.path.insert(0, _ADADEC_PATH)
+
+try:
+    from llm.generator import Generator as AdaDecGenerator
+    _ADADEC_AVAILABLE = True
+except ImportError:
+    _ADADEC_AVAILABLE = False
+    print(
+        "⚠️  AdaDec submodule not importable. "
+        "Run: git submodule update --init --recursive"
+    )
 
 # ============================================================
 # Configuration
