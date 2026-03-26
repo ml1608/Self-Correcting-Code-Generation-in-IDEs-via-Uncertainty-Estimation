@@ -8,10 +8,10 @@ The pipeline:
 1. Loads pre-trained SEP probes from `Dataset+Probes/saved_probes/<dataset>/`
 2. Loads F1-optimized thresholds from `Dataset+Probes/threshold_analysis_plots/<dataset>/threshold_recommendations.csv`
 3. Filters tasks to the held-out test split from `Dataset+Probes/DatasetSplit/<dataset>/`
-4. Runs three evaluations per model × feature method × classifier combination:
+4. Runs two distinct self-correction approaches:
    - **Baseline**: greedy decoding (temp=0.0)
-   - **Adaptive Decoding**: switches to beam search with lookahead when the probe predicts high entropy
-   - **Self-Correction**: resamples up to 5 times when the probe predicts high entropy (SLT only)
+   - **Full Function Regeneration (SLT only)**: resamples up to 5 times when uncertainty is high
+   - **Proactive Regeneration (TBG only)**: triggers AdaDec generation when uncertainty is high
 
 Artifact paths (probes, thresholds, splits) are derived automatically from the dataset name. Model family is inferred automatically from the model ID.
 
@@ -30,8 +30,8 @@ If you already have the repo cloned and the `AdaDec/` directory is empty, run th
 | File | Description |
 |---|---|
 | `run_pipeline_all_models.py` | Main entrypoint — accepts CLI arguments for dataset, models, etc. |
-| `adaptive_decoding_lambda.py` | Custom adaptive decoding: per-token probe gating with a hand-rolled lookahead loop |
-| `adaptive_decoding_adadec.py` | AdaDec-backed adaptive decoding: delegates generation to AdaDec's `Generator` (AdaFixL mode); same SEP probe task-level gating as `adaptive_decoding_lambda.py` |
+| `adaptive_decoding_lambda.py` | Legacy custom adaptive decoding path (kept for reference) |
+| `adaptive_decoding_adadec.py` | AdaDec-backed proactive regeneration: delegates generation to AdaDec's `Generator` (AdaFixL mode) after SEP task-level gating |
 | `self_correction_lambda.py` | MTE-style iterative resampling using SLT probe |
 | `utils.py` | Shared helpers: feature extraction, uncertainty estimation, path resolution, model family inference |
 | `sep_training_lambda.py` | Standalone probe training script (not used by the pipeline — probes are pre-trained via `Dataset+Probes/train_probes.py`) |
@@ -44,15 +44,32 @@ If you already have the repo cloned and the `AdaDec/` directory is empty, run th
 
 AdaDec's `Generator` operates in **AdaFixL** mode: at each generation step it computes the Shannon entropy of the next-token distribution. If entropy exceeds a learned threshold it uses lookahead beam reranking; otherwise it uses greedy selection. This is a purely token-level decision, orthogonal to the task-level gating done by the SEP probe.
 
-**Switching between adaptive decoding implementations**: Both `adaptive_decoding_lambda.py` and `adaptive_decoding_adadec.py` expose the same public API (`adaptive_decode`, `evaluate_adaptive_decoding`). To switch implementations in `run_pipeline_all_models.py`, change the import:
+The main runner is already configured to use `adaptive_decoding_adadec.py` for proactive regeneration.
 
-```python
-# Original custom implementation (default)
-from adaptive_decoding_lambda import adaptive_decode, evaluate_adaptive_decoding
+### Strategy split enforced by the runner
 
-# AdaDec-backed implementation
-from adaptive_decoding_adadec import adaptive_decode, evaluate_adaptive_decoding
+- **SLT probes**: run full-function self-correction only (uncertainty-based and verification-based).
+- **TBG probes**: run proactive regeneration only (AdaDec generation with token-level entropy gating).
+
+This mirrors the intended design where TBG serves as an early task-level gate and AdaDec handles token-level correction dynamics.
+
+### AdaDec threshold learning (logistic-regression learned)
+
+AdaDec's token-level threshold is external to SEP probe training. To learn/update it per dataset:
+
+1. Add your dataset support in `AdaDec/src/learn_threshold/generate_data.py`.
+2. Follow steps 1 and 2 in the AdaDec README:
+   - [https://github.com/SYSUSELab/AdaDec/tree/main](https://github.com/SYSUSELab/AdaDec/tree/main)
+3. Export learned thresholds to JSON and pass them to the runner:
+
+```bash
+python run_pipeline_all_models.py \
+  --adadec_thresholds_json /path/to/adadec_thresholds.json
 ```
+
+Supported threshold JSON formats:
+- Flat: `{ "llama3.2-3b": 0.31, "qwen2.5-coder-3b": 0.28, ... }`
+- Dataset-aware: `{ "bigcodebench": { ... }, "mbpp": { ... } }`
 
 ## Usage
 
@@ -83,7 +100,7 @@ python run_pipeline_all_models.py \
 ```bash
 python run_pipeline_all_models.py \
   --feature_methods SLT \
-  --classifiers mlp
+  --classifiers linreg
 ```
 
 ### Quick test run
@@ -107,7 +124,7 @@ python run_pipeline_all_models.py \
   --prompt_field instruct_prompt \
   --models meta-llama/Llama-3.2-3B-Instruct Qwen/Qwen2.5-Coder-3B-Instruct \
   --feature_methods SLT TBG \
-  --classifiers mlp logreg \
+  --classifiers linreg \
   --limit_tasks 100 \
   --output_dir my_results
 ```
@@ -122,9 +139,10 @@ python run_pipeline_all_models.py \
 | `--prompt_field` | `instruct_prompt` | Field name containing the prompt |
 | `--probes_dir` | Auto-derived from dataset | Path to saved probe subdirectories |
 | `--feature_methods` | `SLT TBG` | Feature extraction methods |
-| `--classifiers` | `mlp logreg` | Probe classifier types |
+| `--classifiers` | `mlp logreg` | Probe classifier types (`linreg` supported and recommended for current setup) |
 | `--limit_tasks` | None (all) | Cap the number of test tasks |
 | `--output_dir` | `pipeline_results_all_models` | Directory for output JSON files |
+| `--adadec_thresholds_json` | None | Optional AdaDec token-threshold JSON (flat or dataset-aware format) |
 
 If `--dataset`, `--split`, or `--prompt_field` are omitted, the pipeline reads them from `split_summary.json` in the split directory, ensuring consistency with the dataset used during probe training.
 
@@ -155,7 +173,8 @@ Each entry in the JSON contains:
 
 ## Key Design Notes
 
-- **TBG vs SLT for self-correction**: TBG features are extracted from the prompt before generation, so they are static per task. They cannot drive self-correction (the uncertainty score would not change between attempts). Self-correction is therefore only run with SLT probes.
+- **SLT full-function regeneration**: SLT uncertainty is computed from generated completions and drives iterative resampling (`temp=0.0` first attempt, then `temp=0.3`) until uncertainty falls below threshold or tests pass (verification mode).
+- **TBG proactive regeneration**: TBG uncertainty is computed before full generation and only decides whether to trigger AdaDec. Once triggered, AdaDec applies token-level entropy gating and lookahead reranking.
 - **Model family inference**: The model family (used for chat template formatting) is inferred automatically from the model ID. For unknown architectures, the tokenizer's built-in chat template is used as a fallback.
 - **Artifact path derivation**: Paths to probes, thresholds, and splits are derived from the dataset name automatically, matching the layout produced by `train_probes.py` and `thresh_tune.py`.
 - **GPU memory**: Models are loaded and unloaded sequentially to fit within a single GPU.

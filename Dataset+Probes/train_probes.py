@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Train SEP Probes (SLT and TBG features with MLP and Logistic Regression)
+Train SEP Probes (SLT and TBG features with entropy regression probes)
 
 This script:
 1. Samples code ONCE (M_samples=20) for all methods
 2. Extracts features using SLT and TBG methods
-3. Trains both MLP and Logistic Regression classifiers for each
+3. Trains regression probes to predict semantic entropy directly
 4. Saves probes and dataset splits
 
-Classifier options:
-- MLP: Multi-layer perceptron with hidden layers (256, 128, 64) - better for practical prediction
-- LogReg: Logistic regression (linear probe) - better for interpretability claims
+Probe options:
+- LINREG: Linear regression probe (predicts semantic entropy directly)
 """
 
 import os
@@ -23,6 +22,10 @@ import random
 import hashlib
 import signal
 import pickle
+import sys
+import tempfile
+import subprocess
+import ast
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -33,9 +36,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.neural_network import MLPClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, accuracy_score
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, r2_score
 from huggingface_hub import login
 from huggingface_hub.utils import GatedRepoError
 from getpass import getpass
@@ -59,7 +61,9 @@ def get_experiment_config():
         # For BigCodeBench: dataset_name="bigcode/bigcodebench", split="v0.1.4"
         "dataset_name": "bigcode/bigcodebench",
         "split": "v0.1.4",
-        "prompt_field": "instruct_prompt",  # BigCodeBench: "instruct_prompt" or "complete_prompt"
+        # For symbolic execution clustering, this must be executable Python context.
+        # Use complete_prompt (not instruct_prompt) on BigCodeBench.
+        "prompt_field": "complete_prompt",  # BigCodeBench: prefer "complete_prompt"
         "limit_tasks": None,  # None = all tasks (1140 for BigCodeBench, 164 for HumanEval)
         
         # Sampling (done ONCE for all methods)
@@ -80,18 +84,19 @@ def get_experiment_config():
         "layers": [-3, -2, -1],
         # "layers": [-1],
         
-        # Classifiers to train
-        # - "mlp": Multi-layer perceptron (better for practical prediction)
-        # - "logreg": Logistic regression / linear probe (better for interpretability)
-        "classifiers": ["mlp", "logreg"],
+        # Probe models to train
+        # - "linreg": linear regression probe (predicts semantic entropy directly)
+        "classifiers": ["linreg"],
         
         # Dataset caching
         # If True, skip building dataset if it already exists (faster for re-training probes)
         # If False, always rebuild the dataset (use when changing sampling parameters)
         "skip_existing_dataset": True,
         
-        # Labeling
-        "label_mode": "median",  # Use all examples - median split for binary classification
+        # Labeling config kept only for backward-compatible analytics/splits.
+        "label_mode": "median",
+        # Semantic clustering method (strict: no fallback)
+        "cluster_method": "symbolic_execution",
     }
 
 
@@ -112,9 +117,14 @@ def get_task_fields(task: dict, dataset_name: str, prompt_field: str = "instruct
         dict with standardized fields: task_id, prompt, test, entry_point, code_prompt
     """
     if "bigcodebench" in dataset_name.lower():
+        # Symbolic execution requires prompt context that can be executed as Python.
+        # complete_prompt contains runnable code scaffolding, while instruct_prompt is NL.
+        prompt = task.get(prompt_field, "")
+        if prompt_field == "instruct_prompt" and task.get("complete_prompt"):
+            prompt = task["complete_prompt"]
         return {
             "task_id": task["task_id"],
-            "prompt": task[prompt_field],  # instruct_prompt or complete_prompt
+            "prompt": prompt,
             "test": task["test"],
             "entry_point": task["entry_point"],  # Always "task_func" for BigCodeBench
             "code_prompt": task.get("code_prompt", ""),
@@ -195,6 +205,40 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def validate_symbolic_setup():
+    """
+    Strict preflight checks for symbolic-execution clustering.
+    Raises RuntimeError with actionable guidance if anything is missing.
+    """
+    helper = os.environ.get("PYEXZ3_CLUSTER_SCRIPT", "").strip()
+    if not helper:
+        raise RuntimeError(
+            "Missing PYEXZ3_CLUSTER_SCRIPT. "
+            "Set it to the absolute path of your symbolic clustering helper."
+        )
+    if not os.path.exists(helper):
+        raise RuntimeError(
+            f"PYEXZ3_CLUSTER_SCRIPT does not exist: {helper}"
+        )
+
+    # Validate helper invocation contract directly.
+    try:
+        proc = subprocess.run(
+            [sys.executable, helper, "--self-check"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Failed to execute symbolic helper: {e}") from e
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Symbolic helper self-check failed (code={proc.returncode}): {proc.stderr.strip()}"
+        )
 
 # ============================================================
 # Helper Functions
@@ -295,8 +339,116 @@ def semantic_signature(prompt_src: str, test_src: str, entry_point: str, code: s
     return sig, int(ok)
 
 
+def symbolic_signature_with_pyexz3(
+    prompt_src: str, test_src: str, entry_point: str, code: str, timeout_s: int = 10
+):
+    """
+    Compute semantic cluster signature with symbolic execution using an external helper.
+
+    Expected helper path via PYEXZ3_CLUSTER_SCRIPT.
+    Helper contract:
+      - argv: <helper.py> --entry-point <entry_point> --timeout <seconds> <module_file.py>
+      - stdout JSON: {"cluster_id": "...", "passed": 0/1}
+
+    Returns:
+      (sig, ok) on success.
+    Raises:
+      RuntimeError on missing helper or execution/parsing failures.
+    """
+    helper = os.environ.get("PYEXZ3_CLUSTER_SCRIPT", "").strip()
+    if not helper or not os.path.exists(helper):
+        raise RuntimeError(
+            "Symbolic execution helper not configured. "
+            "Set PYEXZ3_CLUSTER_SCRIPT to a valid helper script path."
+        )
+
+    if not code:
+        return "INVALID:syntax", 0
+
+    module_src = prompt_src + "\n" + code + "\n\n" + test_src
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tmpf:
+            tmpf.write(module_src)
+            tmp_path = tmpf.name
+
+        cmd = [
+            sys.executable,
+            helper,
+            "--entry-point",
+            entry_point,
+            "--timeout",
+            str(timeout_s),
+            tmp_path,
+        ]
+        # Parent timeout must exceed helper internal timeout + exec/import overhead.
+        parent_timeout = max(timeout_s + 35, 60)
+        try:
+            proc = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=parent_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            h = hashlib.sha256(
+                module_src.encode("utf-8", errors="ignore")
+            ).hexdigest()[:16]
+            return f"SYM:SUBPROC_TIMEOUT:{h}", 0
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"Symbolic execution helper failed (code={proc.returncode}): {proc.stderr.strip()}"
+            )
+
+        raw_out = (proc.stdout or "").strip()
+        if not raw_out:
+            raise RuntimeError("Symbolic helper returned empty stdout.")
+
+        # Robust parsing: helper may emit extra lines/logs.
+        # Try full stdout, then last non-empty line, then python-literal fallback.
+        parsed = None
+        candidates = [raw_out]
+        lines = [ln.strip() for ln in raw_out.splitlines() if ln.strip()]
+        if lines:
+            candidates.append(lines[-1])
+
+        for cand in candidates:
+            try:
+                parsed = json.loads(cand)
+                break
+            except Exception:
+                pass
+            try:
+                literal_obj = ast.literal_eval(cand)
+                if isinstance(literal_obj, dict):
+                    parsed = literal_obj
+                    break
+            except Exception:
+                pass
+
+        if parsed is None:
+            raise RuntimeError(f"Unable to parse helper output as JSON/dict: {raw_out[:400]}")
+        data = parsed
+        cluster_id = str(data.get("cluster_id", "")).strip()
+        if not cluster_id:
+            raise RuntimeError("Symbolic execution helper returned empty cluster_id.")
+        ok = int(bool(data.get("passed", 0)))
+        sig = f"SYM:{cluster_id}"
+        return sig, ok
+    except Exception as e:
+        raise RuntimeError(f"Symbolic execution clustering failed: {e}") from e
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 def parallel_semantic_signatures(prompt_src: str, test_src: str, entry_point: str, 
-                                  codes: list, timeout_s: int = 10, max_workers: int = 4):
+                                 codes: list, timeout_s: int = 10, max_workers: int = 4,
+                                 cluster_method: str = "trace_hash"):
     """
     Run semantic signature checks in parallel using ThreadPoolExecutor.
     
@@ -315,6 +467,10 @@ def parallel_semantic_signatures(prompt_src: str, test_src: str, entry_point: st
         List of (signature, pass_flag) tuples in the same order as input codes
     """
     def evaluate_one(code):
+        if cluster_method == "symbolic_execution":
+            return symbolic_signature_with_pyexz3(
+                prompt_src, test_src, entry_point, code, timeout_s
+            )
         return semantic_signature(prompt_src, test_src, entry_point, code, timeout_s)
     
     # Use ThreadPoolExecutor for parallel I/O-bound execution
@@ -681,7 +837,8 @@ def build_dataset_once(tok, model, tasks, cfg, family: str):
         sig_results = parallel_semantic_signatures(
             prompt_src, test_src, entry_point, codes,
             timeout_s=cfg["test_timeout_s"],
-            max_workers=cfg.get("parallel_workers", 5)
+            max_workers=cfg.get("parallel_workers", 5),
+            cluster_method=cfg.get("cluster_method", "trace_hash"),
         )
         
         # Combine results
@@ -754,6 +911,17 @@ def make_labels(semantic_entropy_values, label_mode="median"):
         y = (sE > thr).astype(int)
         keep = np.ones_like(y, dtype=bool)
         return y, keep, thr
+
+
+def classifier_score(model, X_scaled):
+    """
+    Unified uncertainty score:
+    - classifiers: P(high entropy)
+    - regressors: predicted semantic entropy
+    """
+    if hasattr(model, "predict_proba"):
+        return model.predict_proba(X_scaled)[:, 1]
+    return model.predict(X_scaled)
 
 # ============================================================
 # Save Dataset Splits
@@ -841,6 +1009,8 @@ def run_experiment():
     """Train SEP probes (SLT/TBG features with MLP/LogReg classifiers) for all models."""
     cfg = get_experiment_config()
     set_seed(cfg["seed"])
+    if cfg.get("cluster_method") == "symbolic_execution":
+        validate_symbolic_setup()
     
     start_time = time.time()
     
@@ -980,12 +1150,13 @@ def run_experiment():
             torch.cuda.empty_cache()
             gc.collect()
         
-        # Create labels
+        # Create binary labels once (used by classification probes and threshold tuning)
         y_full, keep_mask, thr = make_labels(df["semantic_entropy"].values, cfg["label_mode"])
         df_use = df[keep_mask].reset_index(drop=True)
-        y = y_full
+        y_class = y_full
+        y_reg = df_use["semantic_entropy"].values.astype(np.float64)
         
-        print(f"\nLabel distribution: y0={np.sum(y==0)}, y1={np.sum(y==1)}")
+        print(f"\nLabel distribution (classification): y0={np.sum(y_class==0)}, y1={np.sum(y_class==1)}")
         print(f"Semantic entropy threshold: {thr:.4f}")
         
         print(f"\n{'='*80}")
@@ -1007,7 +1178,7 @@ def run_experiment():
             
             # Split data - use stratified if possible, else fall back to regular split
             indices = np.arange(len(X))
-            min_class_count = min(np.sum(y == 0), np.sum(y == 1))
+            min_class_count = min(np.sum(y_class == 0), np.sum(y_class == 1))
             
             # Need at least 2 samples per class for stratified split with 70/15/15
             use_stratify = min_class_count >= 4
@@ -1015,27 +1186,30 @@ def run_experiment():
                 print(f"  ⚠️  Small dataset ({min_class_count} samples in minority class), using non-stratified split")
             
             try:
-                idx_train, idx_tmp, y_train, y_tmp = train_test_split(
-                    indices, y, test_size=0.30, random_state=cfg["seed"], 
-                    stratify=y if use_stratify else None
+                idx_train, idx_tmp, y_train_class, y_tmp_class = train_test_split(
+                    indices, y_class, test_size=0.30, random_state=cfg["seed"], 
+                    stratify=y_class if use_stratify else None
                 )
-                idx_val, idx_test, y_val, y_test = train_test_split(
-                    idx_tmp, y_tmp, test_size=0.50, random_state=cfg["seed"], 
-                    stratify=y_tmp if use_stratify and min(np.sum(y_tmp == 0), np.sum(y_tmp == 1)) >= 2 else None
+                idx_val, idx_test, y_val_class, y_test_class = train_test_split(
+                    idx_tmp, y_tmp_class, test_size=0.50, random_state=cfg["seed"], 
+                    stratify=y_tmp_class if use_stratify and min(np.sum(y_tmp_class == 0), np.sum(y_tmp_class == 1)) >= 2 else None
                 )
             except ValueError as e:
                 # Fall back to non-stratified split if stratified fails
                 print(f"  ⚠️  Stratified split failed ({e}), using non-stratified split")
-                idx_train, idx_tmp, y_train, y_tmp = train_test_split(
-                    indices, y, test_size=0.30, random_state=cfg["seed"]
+                idx_train, idx_tmp, y_train_class, y_tmp_class = train_test_split(
+                    indices, y_class, test_size=0.30, random_state=cfg["seed"]
                 )
-                idx_val, idx_test, y_val, y_test = train_test_split(
-                    idx_tmp, y_tmp, test_size=0.50, random_state=cfg["seed"]
+                idx_val, idx_test, y_val_class, y_test_class = train_test_split(
+                    idx_tmp, y_tmp_class, test_size=0.50, random_state=cfg["seed"]
                 )
+            y_train_reg = y_reg[idx_train]
+            y_val_reg = y_reg[idx_val]
+            y_test_reg = y_reg[idx_test]
             
             # Save dataset splits (only once, using first model's first method's split)
             if not split_saved:
-                save_dataset_splits(df_use, y, idx_train, idx_val, idx_test, output_dir, cfg)
+                save_dataset_splits(df_use, y_class, idx_train, idx_val, idx_test, output_dir, cfg)
                 split_saved = True
             
             X_train = X[idx_train]
@@ -1050,56 +1224,33 @@ def run_experiment():
             X_val_s = scaler.transform(X_val)
             X_test_s = scaler.transform(X_test)
             
-            # Check if we have both classes in training set
-            n_classes_train = len(np.unique(y_train))
-            if n_classes_train < 2:
-                print(f"  ⚠️  Training set has only {n_classes_train} class - skipping classifier training")
-                print(f"      (y_train distribution: class 0={np.sum(y_train==0)}, class 1={np.sum(y_train==1)})")
-                continue
-            
-            # Train classifiers (both MLP and LogReg)
+            # Train entropy regression probes
             for classifier_type in cfg["classifiers"]:
-                print(f"\n  Training {classifier_type.upper()} classifier...")
+                print(f"\n  Training {classifier_type.upper()} probe...")
                 
-                if classifier_type == "mlp":
-                    # Disable early stopping if training set is too small
-                    # (needs at least 10 samples for 10% validation fraction)
-                    use_early_stopping = len(X_train) >= 20
-                    if not use_early_stopping:
-                        print(f"    ⚠️  Small training set ({len(X_train)} samples), disabling early stopping")
-                    clf = MLPClassifier(
-                        hidden_layer_sizes=(256, 128, 64),
-                        max_iter=1000, random_state=cfg["seed"],
-                        early_stopping=use_early_stopping, 
-                        validation_fraction=0.1 if use_early_stopping else 0.0, 
-                        verbose=False
-                    )
-                elif classifier_type == "logreg":
-                    clf = LogisticRegression(
-                        max_iter=1000, random_state=cfg["seed"],
-                        solver="lbfgs", C=1.0,  # Default regularization
-                    )
+                if classifier_type == "linreg":
+                    clf = LinearRegression()
+                    clf.fit(X_train_s, y_train_reg)
+                    y_pred = clf.predict(X_test_s)
+                    rmse = float(np.sqrt(mean_squared_error(y_test_reg, y_pred)))
+                    r2 = float(r2_score(y_test_reg, y_pred))
+                    metric_summary = {"test_rmse": rmse, "test_r2": r2}
                 else:
-                    print(f"    ⚠️ Unknown classifier type: {classifier_type}, skipping")
-                    continue
+                    raise ValueError(
+                        f"Unsupported probe type '{classifier_type}'. "
+                        "Only 'linreg' is supported in this strict entropy-regression setup."
+                    )
+                print(f"    Test RMSE:     {metric_summary['test_rmse']:.4f}")
+                print(f"    Test R2:       {metric_summary['test_r2']:.4f}")
                 
-                clf.fit(X_train_s, y_train)
-                
-                # Evaluate
-                probs = clf.predict_proba(X_test_s)[:, 1]
-                y_pred = clf.predict(X_test_s)
-                acc = accuracy_score(y_test, y_pred)
-                auc = roc_auc_score(y_test, probs) if len(np.unique(y_test)) > 1 else float("nan")
-                
-                print(f"    Test Accuracy: {acc:.4f}")
-                print(f"    Test AUROC:    {auc:.4f}")
-                
-                # Compute recommended threshold (median of predictions on val+test)
-                all_probs = np.concatenate([
-                    clf.predict_proba(X_val_s)[:, 1],
-                    clf.predict_proba(X_test_s)[:, 1]
+                # Compute recommended threshold.
+                # Classification probes: median P(high entropy)
+                # Regression probes: median predicted semantic entropy
+                all_scores = np.concatenate([
+                    classifier_score(clf, X_val_s),
+                    classifier_score(clf, X_test_s),
                 ])
-                recommended_threshold = np.percentile(all_probs, 50)
+                recommended_threshold = float(np.percentile(all_scores, 50))
                 
                 # Save probe (with model identifier and classifier type)
                 model_name_safe = model_id.replace("/", "_")
@@ -1113,6 +1264,7 @@ def run_experiment():
                     "classifier": clf,
                     "threshold": thr,
                     "recommended_threshold": recommended_threshold,
+                    "probe_kind": "regression" if classifier_type == "linreg" else "classification",
                 }
                 
                 probe_pkl_path = probe_dir / "probe.pkl"
@@ -1125,8 +1277,7 @@ def run_experiment():
                     "model_family": family,
                     "feature_method": feature_method,
                     "classifier": classifier_type,
-                    "test_accuracy": float(acc),
-                    "test_auc": float(auc),
+                    **metric_summary,
                     "feature_dim": int(X.shape[1]),
                     "layers": cfg["layers"],
                     "n_train": int(len(X_train)),
@@ -1155,8 +1306,7 @@ def run_experiment():
                     "model_family": family,
                     "feature_method": feature_method,
                     "classifier": classifier_type,
-                    "test_accuracy": acc,
-                    "test_auc": auc,
+                    **metric_summary,
                     "feature_dim": X.shape[1],
                     "n_train": len(X_train),
                     "n_val": len(X_val),
@@ -1174,7 +1324,12 @@ def run_experiment():
     print(f"{'='*80}\n")
     
     results_df = pd.DataFrame(all_results)
-    results_df = results_df.sort_values(["model_id", "test_accuracy"], ascending=[True, False])
+    if "test_accuracy" in results_df.columns:
+        sort_cols = ["model_id", "test_accuracy"]
+        results_df["test_accuracy"] = results_df["test_accuracy"].fillna(-1.0)
+        results_df = results_df.sort_values(sort_cols, ascending=[True, False])
+    else:
+        results_df = results_df.sort_values(["model_id"])
     
     print(results_df.to_string(index=False))
     

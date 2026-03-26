@@ -27,6 +27,7 @@ import signal
 import hashlib
 import numpy as np
 import pandas as pd
+import argparse
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
@@ -561,7 +562,7 @@ def recreate_test_split(df, feature_method: str, seed: int = 42):
 # Threshold Analysis
 # ============================================================
 
-def evaluate_at_threshold(y_true, y_probs, threshold: float):
+def evaluate_at_threshold(y_true, y_probs, threshold: float, n_bootstrap: int = 0, ci_level: float = 0.95):
     """Evaluate metrics at a specific threshold."""
     y_pred = (y_probs >= threshold).astype(int)
     
@@ -587,7 +588,7 @@ def evaluate_at_threshold(y_true, y_probs, threshold: float):
     # Confusion matrix
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
     
-    return {
+    result = {
         "threshold": threshold,
         "precision": precision,
         "recall": recall,
@@ -599,9 +600,32 @@ def evaluate_at_threshold(y_true, y_probs, threshold: float):
         "true_negatives": int(tn),
         "false_negatives": int(fn),
     }
+    
+    if n_bootstrap and n_bootstrap > 0:
+        n = len(y_true)
+        alpha = 1.0 - ci_level
+        lo_q = 100.0 * (alpha / 2.0)
+        hi_q = 100.0 * (1.0 - alpha / 2.0)
+        f1_boot, acc_boot, trig_boot = [], [], []
+        for _ in range(n_bootstrap):
+            idx = np.random.randint(0, n, size=n)
+            yb = y_true[idx]
+            pb = y_probs[idx]
+            yp = (pb >= threshold).astype(int)
+            f1_boot.append(float(f1_score(yb, yp, zero_division=0.0)))
+            acc_boot.append(float(accuracy_score(yb, yp)))
+            trig_boot.append(float(np.mean(yp)))
+        result["error_bars"] = {
+            "ci_level": float(ci_level),
+            "f1_ci": [float(np.percentile(f1_boot, lo_q)), float(np.percentile(f1_boot, hi_q))],
+            "accuracy_ci": [float(np.percentile(acc_boot, lo_q)), float(np.percentile(acc_boot, hi_q))],
+            "trigger_rate_ci": [float(np.percentile(trig_boot, lo_q)), float(np.percentile(trig_boot, hi_q))],
+        }
+    return result
 
 def analyze_probe_thresholds(probe_dir: Path, df: pd.DataFrame, split_dir: Path = None, 
-                             hf_token: str = None, regenerate_features: bool = True):
+                             hf_token: str = None, regenerate_features: bool = True,
+                             n_bootstrap: int = 0, ci_level: float = 0.95):
     """
     Analyze thresholds for a single probe using the VALIDATION set.
     
@@ -745,8 +769,11 @@ def analyze_probe_thresholds(probe_dir: Path, df: pd.DataFrame, split_dir: Path 
     # Scale validation features
     X_val_s = scaler.transform(X_val)
     
-    # Get predictions
-    y_probs = clf.predict_proba(X_val_s)[:, 1]
+    # Get uncertainty score (classification probability or regression prediction)
+    if hasattr(clf, "predict_proba"):
+        y_probs = clf.predict_proba(X_val_s)[:, 1]
+    else:
+        y_probs = clf.predict(X_val_s)
     
     print(f"\nValidation Set Statistics:")
     print(f"  Size: {len(y_val)}")
@@ -759,15 +786,26 @@ def analyze_probe_thresholds(probe_dir: Path, df: pd.DataFrame, split_dir: Path 
     print(f"  Mean: {np.mean(y_probs):.4f}")
     print(f"  Std: {np.std(y_probs):.4f}")
     
+    # Choose threshold grid.
+    # For classifiers we keep fixed thresholds for compatibility.
+    # For regression probes, use score quantiles from the validation set.
+    if hasattr(clf, "predict_proba"):
+        thresholds_to_test = THRESHOLDS_TO_TEST
+    else:
+        qs = np.quantile(y_probs, [0.2, 0.35, 0.5, 0.65, 0.8])
+        thresholds_to_test = [float(x) for x in sorted(set(qs.tolist()))]
+
     # Test each threshold on validation set
     print(f"\n{'─'*80}")
-    print("THRESHOLD ANALYSIS ON VALIDATION SET (0.3, 0.4, 0.5, 0.6, 0.7)")
+    print(f"THRESHOLD ANALYSIS ON VALIDATION SET ({', '.join(f'{t:.4f}' for t in thresholds_to_test)})")
     print(f"{'─'*80}")
     
     threshold_results = []
     
-    for thresh in THRESHOLDS_TO_TEST:
-        result = evaluate_at_threshold(y_val, y_probs, thresh)
+    for thresh in thresholds_to_test:
+        result = evaluate_at_threshold(
+            y_val, y_probs, thresh, n_bootstrap=n_bootstrap, ci_level=ci_level
+        )
         threshold_results.append(result)
         
         print(f"\nThreshold: {thresh:.1f}")
@@ -793,7 +831,7 @@ def analyze_probe_thresholds(probe_dir: Path, df: pd.DataFrame, split_dir: Path 
     
     # Find best threshold from tested values (tuned on validation set)
     best_f1_idx = np.argmax([r['f1'] for r in threshold_results])
-    best_thresh = THRESHOLDS_TO_TEST[best_f1_idx]
+    best_thresh = thresholds_to_test[best_f1_idx]
     best_result = threshold_results[best_f1_idx]
     
     print(f"\n{'─'*80}")
@@ -935,7 +973,7 @@ def plot_threshold_analysis(analysis_results, y_val, y_probs, output_dir: Path):
 # Main Analysis
 # ============================================================
 
-def main(dataset_name: str = None):
+def main(dataset_name: str = None, n_bootstrap: int = 0, ci_level: float = 0.95):
     """
     Run threshold analysis for all probes.
     
@@ -1045,7 +1083,8 @@ def main(dataset_name: str = None):
             # Analyze probe on validation set (using dataset-specific split_dir)
             result = analyze_probe_thresholds(
                 probe_dir, df, split_dir=split_dir, 
-                hf_token=hf_token, regenerate_features=True
+                hf_token=hf_token, regenerate_features=True,
+                n_bootstrap=n_bootstrap, ci_level=ci_level,
             )
             
             if result is not None:
@@ -1132,5 +1171,10 @@ def main(dataset_name: str = None):
     print(f"Results saved to: {output_dir}/")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Threshold tuning with optional bootstrap error bars.")
+    parser.add_argument("--dataset", default=None, help="Dataset name to tune (e.g., bigcode/bigcodebench, mbpp).")
+    parser.add_argument("--bootstrap_samples", type=int, default=0, help="Bootstrap samples for metric CIs.")
+    parser.add_argument("--ci_level", type=float, default=0.95, help="CI level for bootstrap CIs.")
+    args = parser.parse_args()
+    main(dataset_name=args.dataset, n_bootstrap=args.bootstrap_samples, ci_level=args.ci_level)
 

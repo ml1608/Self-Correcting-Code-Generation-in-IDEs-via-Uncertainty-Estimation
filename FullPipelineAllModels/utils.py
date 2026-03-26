@@ -73,7 +73,12 @@ MODEL_ID_TO_THRESHOLD_KEY = {
     "Qwen/Qwen2.5-Coder-3B-Instruct": "qwen2.5-coder-3b",
 }
 
-def get_token_entropy_threshold(model_id: str, default: float = 0.3) -> float:
+def get_token_entropy_threshold(
+    model_id: str,
+    default: float = 0.3,
+    dataset_name: Optional[str] = None,
+    thresholds_path: Optional[Path] = None,
+) -> float:
     """
     Get model-specific token entropy threshold for adaptive decoding.
     
@@ -84,14 +89,25 @@ def get_token_entropy_threshold(model_id: str, default: float = 0.3) -> float:
     Returns:
         Token entropy threshold for the model
     """
-    if not ADA_DEC_THRESHOLDS_PATH.exists():
-        print(f"⚠️  Token entropy thresholds file not found: {ADA_DEC_THRESHOLDS_PATH}")
+    active_path = Path(thresholds_path) if thresholds_path else ADA_DEC_THRESHOLDS_PATH
+    if not active_path.exists():
+        print(f"⚠️  Token entropy thresholds file not found: {active_path}")
         return default
     
     try:
-        with open(ADA_DEC_THRESHOLDS_PATH, "r") as f:
+        with open(active_path, "r") as f:
             thresholds = json.load(f)
-        
+
+        # Optional dataset-aware format:
+        # {
+        #   "bigcodebench": {"llama3.2-3b": 0.32, ...},
+        #   "mbpp": {"llama3.2-3b": 0.28, ...}
+        # }
+        if dataset_name is not None:
+            safe_dataset = get_dataset_safe_name(dataset_name)
+            if isinstance(thresholds.get(safe_dataset), dict):
+                thresholds = thresholds[safe_dataset]
+
         # Get the key for this model
         threshold_key = MODEL_ID_TO_THRESHOLD_KEY.get(model_id)
         if threshold_key is None:
@@ -332,11 +348,14 @@ def estimate_uncertainty(
                 method=feature_method,
             )
 
-    # Predict uncertainty using SEP probe
+    # Predict uncertainty using SEP probe.
+    # Classification probes return P(high entropy).
+    # Regression probes return predicted semantic entropy.
     feat_scaled = scaler.transform(feat.reshape(1, -1))
-    prob_high_entropy = clf.predict_proba(feat_scaled)[
-        0, 1
-    ]  # Probability of high semantic entropy
+    if hasattr(clf, "predict_proba"):
+        prob_high_entropy = clf.predict_proba(feat_scaled)[0, 1]
+    else:
+        prob_high_entropy = clf.predict(feat_scaled)[0]
 
     return float(prob_high_entropy)
 

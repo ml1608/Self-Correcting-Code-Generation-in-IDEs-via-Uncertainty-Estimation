@@ -371,7 +371,10 @@ def adaptive_generate_one_token(
     scaler = probe_data["scaler"]
     classifier = probe_data["classifier"]
     features_scaled = scaler.transform(tbg_features.reshape(1, -1))
-    uncertainty_score = classifier.predict_proba(features_scaled)[0, 1]
+    if hasattr(classifier, "predict_proba"):
+        uncertainty_score = classifier.predict_proba(features_scaled)[0, 1]
+    else:
+        uncertainty_score = classifier.predict(features_scaled)[0]
 
     if verbose:
         print(

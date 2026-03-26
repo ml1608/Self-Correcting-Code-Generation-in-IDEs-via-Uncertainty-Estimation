@@ -1,0 +1,7 @@
+model_id,model_family,feature_method,probe_type,pearson_r,pearson_p,n_samples
+Qwen/Qwen2.5-Coder-3B-Instruct,qwen-coder-instruct,SLT,SLT+MLP,0.8219872268355857,4.6768232627471463e-07,25
+Qwen/Qwen2.5-Coder-3B-Instruct,qwen-coder-instruct,TBG,TBG+MLP,0.6288915523323714,0.0007589893662512155,25
+deepseek-ai/deepseek-coder-1.3b-instruct,deepseek,SLT,SLT+MLP,0.7923641244961052,2.349749838819126e-06,25
+deepseek-ai/deepseek-coder-1.3b-instruct,deepseek,TBG,TBG+MLP,0.44279071047110213,0.026647863326857948,25
+meta-llama/Llama-3.2-3B-Instruct,llama,SLT,SLT+MLP,0.38578526051650847,0.056825013173940064,25
+meta-llama/Llama-3.2-3B-Instruct,llama,TBG,TBG+MLP,0.5266406466469153,0.006838595201905834,25

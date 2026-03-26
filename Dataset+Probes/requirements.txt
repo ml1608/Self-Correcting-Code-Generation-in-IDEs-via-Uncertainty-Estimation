@@ -9,4 +9,6 @@ scipy
 huggingface_hub
 torch
 numpy<2.0
+z3-solver
+git+https://github.com/thomasjball/PyExZ3.git
 

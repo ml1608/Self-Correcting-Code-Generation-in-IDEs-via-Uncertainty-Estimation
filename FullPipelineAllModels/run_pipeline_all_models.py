@@ -16,6 +16,8 @@ This file orchestrates the full pipeline for all models and feature methods:
 import os
 import json
 import time
+import random
+import numpy as np
 import pandas as pd
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -29,7 +31,8 @@ from getpass import getpass
 from tqdm import tqdm
 
 # Import from our modules
-from adaptive_decoding_lambda import (
+# Proactive regeneration uses the AdaDec submodule-backed implementation.
+from adaptive_decoding_adadec import (
     load_sep_probe,
     load_model,
     greedy_decode,
@@ -64,7 +67,7 @@ DEFAULT_MODELS = [
     "deepseek-ai/deepseek-coder-1.3b-instruct",
 ]
 DEFAULT_FEATURE_METHODS = ["SLT", "TBG"]
-DEFAULT_CLASSIFIERS = ["logreg", "mlp"]
+DEFAULT_CLASSIFIERS = ["linreg"]
 
 SCRIPT_DIR = Path(__file__).parent
 
@@ -86,6 +89,10 @@ def get_pipeline_config(args=None):
         "output_dir": args.output_dir if args and args.output_dir else "pipeline_results_all_models",
         "generate_report": True,
         "save_detailed_results": True,
+        "adaptive_trials": args.adaptive_trials if args else 1,
+        "bootstrap_samples": args.bootstrap_samples if args else 1000,
+        "ci_level": args.ci_level if args else 0.95,
+        "adadec_thresholds_json": args.adadec_thresholds_json if args else None,
     }
 
 
@@ -165,6 +172,46 @@ def filter_tasks_by_split(tasks: List[Dict], test_task_ids: List[str]) -> List[D
     filtered = [task_dict[tid] for tid in test_task_ids if tid in task_dict]
     print(f"✅ Filtered to {len(filtered)} test set tasks (from {len(tasks)} total)")
     return filtered
+
+
+def bootstrap_pass_metrics(
+    task_results: List[Dict[str, Any]],
+    baseline_key: str,
+    adaptive_key: str,
+    n_bootstrap: int = 1000,
+    ci_level: float = 0.95,
+) -> Dict[str, Any]:
+    """Bootstrap CIs for baseline/adaptive pass@1 and improvement."""
+    if not task_results:
+        return {}
+
+    pairs = [
+        (int(r.get(baseline_key, False)), int(r.get(adaptive_key, False)))
+        for r in task_results
+    ]
+    n = len(pairs)
+    base = np.array([p[0] for p in pairs], dtype=np.float64)
+    ada = np.array([p[1] for p in pairs], dtype=np.float64)
+    improvement = ada - base
+
+    alpha = 1.0 - ci_level
+    lo_q = 100.0 * (alpha / 2.0)
+    hi_q = 100.0 * (1.0 - alpha / 2.0)
+
+    base_boot, ada_boot, imp_boot = [], [], []
+    for _ in range(max(1, n_bootstrap)):
+        idx = np.random.randint(0, n, size=n)
+        base_boot.append(float(np.mean(base[idx])))
+        ada_boot.append(float(np.mean(ada[idx])))
+        imp_boot.append(float(np.mean(improvement[idx])))
+
+    return {
+        "n_bootstrap": int(max(1, n_bootstrap)),
+        "ci_level": float(ci_level),
+        "baseline_pass_at_1_ci": [float(np.percentile(base_boot, lo_q)), float(np.percentile(base_boot, hi_q))],
+        "adaptive_pass_at_1_ci": [float(np.percentile(ada_boot, lo_q)), float(np.percentile(ada_boot, hi_q))],
+        "improvement_ci": [float(np.percentile(imp_boot, lo_q)), float(np.percentile(imp_boot, hi_q))],
+    }
 
 
 # ============================================================
@@ -261,21 +308,61 @@ def evaluate_on_humaneval_for_model(
         print(f"   Using threshold: {threshold:.4f}")
 
         adaptive_start = time.time()
-        adaptive_cfg = get_adaptive_config()
-        adaptive_cfg["limit_tasks"] = len(test_tasks)
-        adaptive_cfg["use_sep_probe"] = True
-        # Load model-specific token entropy threshold
-        adaptive_cfg["fallback_token_entropy_threshold"] = get_token_entropy_threshold(model_id)
+        trial_results = []
+        n_trials = max(1, int(cfg.get("adaptive_trials", 1)))
 
-        adaptive_results = evaluate_adaptive_decoding(
-            test_tasks,
-            tok,
-            model,
-            adaptive_cfg,
-            sep_probe=sep_probe,
-            baseline_results=baseline_results,
-            baseline_task_by_id=baseline_task_by_id,
+        for trial_idx in range(n_trials):
+            random.seed(42 + trial_idx)
+            np.random.seed(42 + trial_idx)
+            torch.manual_seed(42 + trial_idx)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(42 + trial_idx)
+
+            adaptive_cfg = get_adaptive_config()
+            adaptive_cfg["limit_tasks"] = len(test_tasks)
+            adaptive_cfg["use_sep_probe"] = True
+            adaptive_cfg["seed"] = 42 + trial_idx
+            # Load model-specific (optionally dataset-aware) AdaDec token threshold
+            adaptive_cfg["fallback_token_entropy_threshold"] = get_token_entropy_threshold(
+                model_id,
+                dataset_name=cfg.get("dataset_name"),
+                thresholds_path=cfg.get("adadec_thresholds_json"),
+            )
+
+            trial_res = evaluate_adaptive_decoding(
+                test_tasks,
+                tok,
+                model,
+                adaptive_cfg,
+                sep_probe=sep_probe,
+                baseline_results=baseline_results,
+                baseline_task_by_id=baseline_task_by_id,
+            )
+            trial_results.append(trial_res)
+
+        adaptive_results = trial_results[0]
+        if n_trials > 1:
+            pass_rates = [r["adaptive_pass_at_1"] for r in trial_results]
+            improvements = [r["improvement"] for r in trial_results]
+            lats = [r["avg_adaptive_latency"] for r in trial_results]
+            adaptive_results["multi_trial"] = {
+                "n_trials": n_trials,
+                "adaptive_pass_at_1_mean": float(np.mean(pass_rates)),
+                "adaptive_pass_at_1_std": float(np.std(pass_rates)),
+                "improvement_mean": float(np.mean(improvements)),
+                "improvement_std": float(np.std(improvements)),
+                "avg_adaptive_latency_mean": float(np.mean(lats)),
+                "avg_adaptive_latency_std": float(np.std(lats)),
+            }
+
+        adaptive_results["error_bars"] = bootstrap_pass_metrics(
+            adaptive_results.get("task_results", []),
+            baseline_key="baseline_correct",
+            adaptive_key="adaptive_correct",
+            n_bootstrap=max(1, int(cfg.get("bootstrap_samples", 1000))),
+            ci_level=float(cfg.get("ci_level", 0.95)),
         )
+
         adaptive_time = time.time() - adaptive_start
         results["adaptive_results"] = adaptive_results
         results["adaptive_time"] = adaptive_time
@@ -602,7 +689,7 @@ def parse_args():
     )
     parser.add_argument(
         "--classifiers", nargs="+", default=DEFAULT_CLASSIFIERS,
-        choices=["mlp", "logreg"],
+        choices=["mlp", "logreg", "linreg"],
         help="Probe classifier types to evaluate.",
     )
     parser.add_argument(
@@ -612,6 +699,33 @@ def parse_args():
     parser.add_argument(
         "--output_dir", default="pipeline_results_all_models",
         help="Directory to write result JSON files.",
+    )
+    parser.add_argument(
+        "--threshold_csv", default=None,
+        help="Optional override for threshold_recommendations.csv path.",
+    )
+    parser.add_argument(
+        "--split_dir", default=None,
+        help="Optional override for DatasetSplit directory path.",
+    )
+    parser.add_argument(
+        "--adaptive_trials", type=int, default=1,
+        help="Number of adaptive-decoding evaluation trials to run.",
+    )
+    parser.add_argument(
+        "--bootstrap_samples", type=int, default=1000,
+        help="Bootstrap samples for adaptive pass@1/improvement confidence intervals.",
+    )
+    parser.add_argument(
+        "--ci_level", type=float, default=0.95,
+        help="Confidence level for bootstrap CIs (e.g. 0.95).",
+    )
+    parser.add_argument(
+        "--adadec_thresholds_json",
+        default=None,
+        help="Optional JSON path for AdaDec token-level entropy thresholds. "
+             "Supports either flat {model_key: value} or dataset-aware "
+             "{dataset: {model_key: value}} format.",
     )
     return parser.parse_args()
 
@@ -645,10 +759,17 @@ def main():
     # We first try to read from split_summary.json so that the pipeline always
     # uses the same dataset that the probes were trained on.
     artifact_paths = get_artifact_paths(cfg["dataset_name"])
-    split_dir = Path(args.probes_dir).parent.parent / "DatasetSplit" / \
-                artifact_paths["split_dir"].name if args.probes_dir else artifact_paths["split_dir"]
+    split_dir = (
+        Path(args.split_dir)
+        if args.split_dir
+        else (
+            Path(args.probes_dir).parent.parent / "DatasetSplit" / artifact_paths["split_dir"].name
+            if args.probes_dir
+            else artifact_paths["split_dir"]
+        )
+    )
     probes_dir = Path(args.probes_dir) if args.probes_dir else artifact_paths["probes_dir"]
-    threshold_csv = artifact_paths["threshold_csv"]
+    threshold_csv = Path(args.threshold_csv) if args.threshold_csv else artifact_paths["threshold_csv"]
 
     # Load thresholds
     print(f"\nLoading thresholds from: {threshold_csv}")
@@ -716,15 +837,17 @@ def main():
 
                 threshold = thresholds_dict[probe_name]
 
-                # TBG features are extracted from the prompt alone and are static
-                # per task, so they cannot drive self-correction (the signal never
-                # changes between attempts).
+                # Exact split of strategies:
+                # - Full function regeneration: SLT-only (self-correction enabled)
+                # - Proactive regeneration via AdaDec: TBG-only (adaptive enabled)
                 if feature_method == "TBG":
                     cfg["run_self_correction_with_uncertainty"] = False
                     cfg["run_self_correction_with_verification"] = False
+                    cfg["run_adaptive_decoding"] = True
                 else:
                     cfg["run_self_correction_with_uncertainty"] = True
                     cfg["run_self_correction_with_verification"] = True
+                    cfg["run_adaptive_decoding"] = False
 
                 try:
                     result = evaluate_on_humaneval_for_model(
@@ -793,6 +916,22 @@ def main():
                 f"    Adaptive Ratio: {adaptive.get('avg_adaptive_ratio', 0)*100:.1f}%"
             )
             print(f"    Tasks Improved: {adaptive.get('num_improved', 0)}")
+            if adaptive.get("error_bars"):
+                ci = adaptive["error_bars"]
+                print(
+                    f"    Pass@1 CI ({ci.get('ci_level', 0.95):.2f}): "
+                    f"[{ci['adaptive_pass_at_1_ci'][0]:.4f}, {ci['adaptive_pass_at_1_ci'][1]:.4f}]"
+                )
+                print(
+                    f"    Improvement CI: "
+                    f"[{ci['improvement_ci'][0]:+.4f}, {ci['improvement_ci'][1]:+.4f}]"
+                )
+            if adaptive.get("multi_trial"):
+                mt = adaptive["multi_trial"]
+                print(
+                    f"    Multi-trial ({mt['n_trials']}): "
+                    f"Pass@1={mt['adaptive_pass_at_1_mean']:.4f}±{mt['adaptive_pass_at_1_std']:.4f}"
+                )
 
         if uncertainty_correction:
             print(f"  Self-Correction (MTE-style Resampling):")
