@@ -10,3 +10,4 @@ __pycache__/
 *.pyzwz
 *_results.json
 probe_dataset_bigcodebench_*.csv.sync.env
+.sync.env
