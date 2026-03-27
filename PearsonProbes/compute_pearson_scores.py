@@ -166,7 +166,7 @@ def load_saved_probe(probe_dir: Path):
 def get_probe_path(model_id: str, feature_method: str) -> Path:
     """Get probe path for a given model and feature method."""
     model_name_safe = model_id.replace("/", "_")
-    probe_dir_name = f"{model_name_safe}_{feature_method}_mlp"
+    probe_dir_name = f"{model_name_safe}_{feature_method}_linreg"
     return SAVED_PROBES_DIR / probe_dir_name
 
 def get_dataset_csv_path(model_id: str) -> Path:
