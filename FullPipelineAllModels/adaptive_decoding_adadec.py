@@ -35,6 +35,7 @@ from utils import (
 # Re-use helpers that are identical to adaptive_decoding_lambda
 from adaptive_decoding_lambda import (
     load_sep_probe,
+    load_model,
     evaluate_completion,
     greedy_decode,
     get_config,

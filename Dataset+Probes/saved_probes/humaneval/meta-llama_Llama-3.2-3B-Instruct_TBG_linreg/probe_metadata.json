@@ -1,0 +1,25 @@
+{
+  "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+  "model_family": "llama",
+  "feature_method": "TBG",
+  "classifier": "linreg",
+  "test_rmse": 0.14182984538094542,
+  "test_r2": -0.3691020131202809,
+  "feature_dim": 9216,
+  "layers": [
+    -3,
+    -2,
+    -1
+  ],
+  "n_train": 114,
+  "n_val": 25,
+  "n_test": 25,
+  "semantic_entropy_threshold": 0.0,
+  "recommended_threshold": 0.011706494260579348,
+  "M_samples": 5,
+  "label_mode": "median",
+  "dataset_name": "openai_humaneval",
+  "dataset_split": "test",
+  "prompt_field": "prompt",
+  "tbg_extraction": "one_token"
+}

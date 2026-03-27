@@ -59,11 +59,11 @@ def get_experiment_config():
         # Dataset configuration - supports HumanEval and BigCodeBench
         # For HumanEval: dataset_name="openai_humaneval", split="test"
         # For BigCodeBench: dataset_name="bigcode/bigcodebench", split="v0.1.4"
-        "dataset_name": "bigcode/bigcodebench",
-        "split": "v0.1.4",
+        "dataset_name": "openai_humaneval",
+        "split": "test",
         # For symbolic execution clustering, this must be executable Python context.
         # Use complete_prompt (not instruct_prompt) on BigCodeBench.
-        "prompt_field": "complete_prompt",  # BigCodeBench: prefer "complete_prompt"
+        "prompt_field": "prompt",  # BigCodeBench: prefer "complete_prompt"
         "limit_tasks": None,  # None = all tasks (1140 for BigCodeBench, 164 for HumanEval)
         
         # Sampling (done ONCE for all methods)
