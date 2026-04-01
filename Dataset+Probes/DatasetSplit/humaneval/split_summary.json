@@ -4,10 +4,10 @@
   "prompt_field": "prompt",
   "seed": 42,
   "total_tasks": 164,
-  "train_count": 114,
-  "val_count": 25,
-  "test_count": 25,
-  "train_ratio": 0.6951219512195121,
-  "val_ratio": 0.1524390243902439,
-  "test_ratio": 0.1524390243902439
+  "train_count": 69,
+  "val_count": 64,
+  "test_count": 31,
+  "train_ratio": 0.42073170731707316,
+  "val_ratio": 0.3902439024390244,
+  "test_ratio": 0.18902439024390244
 }

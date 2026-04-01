@@ -67,14 +67,14 @@ def get_experiment_config():
         "limit_tasks": None,  # None = all tasks (1140 for BigCodeBench, 164 for HumanEval)
         
         # Sampling (done ONCE for all methods)
-        "M_samples": 5,
+        "M_samples": 20,
         
-        "sample_max_new_tokens": 256,
+        "sample_max_new_tokens": 512,
         "sample_temperature": 0.7,
         "sample_top_p": 0.95,
-        "greedy_max_new_tokens": 256,
-        "test_timeout_s": 10,
-        "parallel_workers": 5,  # Number of parallel workers for code execution
+        "greedy_max_new_tokens": 512,
+        "test_timeout_s": 5,
+        "parallel_workers": 1,  # Number of parallel workers for code execution
         "seed": 42,
         
         # Feature extraction methods to use (only SLT and TBG)
@@ -91,12 +91,12 @@ def get_experiment_config():
         # Dataset caching
         # If True, skip building dataset if it already exists (faster for re-training probes)
         # If False, always rebuild the dataset (use when changing sampling parameters)
-        "skip_existing_dataset": True,
+        "skip_existing_dataset": False,
         
         # Labeling config kept only for backward-compatible analytics/splits.
         "label_mode": "median",
         # Semantic clustering method (strict: no fallback)
-        "cluster_method": "symbolic_execution",
+        "cluster_method": "trace_hash",
     }
 
 
@@ -474,8 +474,7 @@ def parallel_semantic_signatures(prompt_src: str, test_src: str, entry_point: st
         return semantic_signature(prompt_src, test_src, entry_point, code, timeout_s)
     
     # Use ThreadPoolExecutor for parallel I/O-bound execution
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = list(executor.map(evaluate_one, codes))
+    results = [evaluate_one(code) for code in codes]
     
     return results
 
@@ -1187,21 +1186,21 @@ def run_experiment():
             
             try:
                 idx_train, idx_tmp, y_train_class, y_tmp_class = train_test_split(
-                    indices, y_class, test_size=0.30, random_state=cfg["seed"], 
+                    indices, y_class, test_size=0.5732, random_state=cfg["seed"], 
                     stratify=y_class if use_stratify else None
                 )
                 idx_val, idx_test, y_val_class, y_test_class = train_test_split(
-                    idx_tmp, y_tmp_class, test_size=0.50, random_state=cfg["seed"], 
+                    idx_tmp, y_tmp_class, test_size=0.3191, random_state=cfg["seed"], 
                     stratify=y_tmp_class if use_stratify and min(np.sum(y_tmp_class == 0), np.sum(y_tmp_class == 1)) >= 2 else None
                 )
             except ValueError as e:
                 # Fall back to non-stratified split if stratified fails
                 print(f"  ⚠️  Stratified split failed ({e}), using non-stratified split")
                 idx_train, idx_tmp, y_train_class, y_tmp_class = train_test_split(
-                    indices, y_class, test_size=0.30, random_state=cfg["seed"]
+                    indices, y_class, test_size=0.5732, random_state=cfg["seed"]
                 )
                 idx_val, idx_test, y_val_class, y_test_class = train_test_split(
-                    idx_tmp, y_tmp_class, test_size=0.50, random_state=cfg["seed"]
+                    idx_tmp, y_tmp_class, test_size=0.3191, random_state=cfg["seed"]
                 )
             y_train_reg = y_reg[idx_train]
             y_val_reg = y_reg[idx_val]

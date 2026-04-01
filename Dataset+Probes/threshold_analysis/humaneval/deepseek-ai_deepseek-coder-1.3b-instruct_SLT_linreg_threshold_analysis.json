@@ -1,0 +1,97 @@
+{
+  "probe_name": "deepseek-ai_deepseek-coder-1.3b-instruct_SLT_linreg",
+  "model_id": "deepseek-ai/deepseek-coder-1.3b-instruct",
+  "feature_method": "SLT",
+  "classifier": "linreg",
+  "current_recommended_threshold": 0.076742984354496,
+  "val_set_size": 64,
+  "prediction_stats": {
+    "min": -1.0318224430084229,
+    "median": 2.3469328880310059e-07,
+    "max": 0.691149890422821,
+    "mean": -0.004988433793187141,
+    "std": 0.2831723690032959
+  },
+  "threshold_results": [
+    {
+      "threshold": -0.06170106381177902,
+      "precision": 0.11764705882352941,
+      "recall": 0.75,
+      "f1": 0.20338983050847456,
+      "accuracy": 0.265625,
+      "trigger_rate": 0.796875,
+      "true_positives": 6,
+      "false_positives": 45,
+      "true_negatives": 11,
+      "false_negatives": 2
+    },
+    {
+      "threshold": -1.7024576663970954e-07,
+      "precision": 0.12195121951219512,
+      "recall": 0.625,
+      "f1": 0.20408163265306123,
+      "accuracy": 0.390625,
+      "trigger_rate": 0.640625,
+      "true_positives": 5,
+      "false_positives": 36,
+      "true_negatives": 20,
+      "false_negatives": 3
+    },
+    {
+      "threshold": 2.3469328880310059e-07,
+      "precision": 0.15625,
+      "recall": 0.625,
+      "f1": 0.25,
+      "accuracy": 0.53125,
+      "trigger_rate": 0.5,
+      "true_positives": 5,
+      "false_positives": 27,
+      "true_negatives": 29,
+      "false_negatives": 3
+    },
+    {
+      "threshold": 0.05623467713594438,
+      "precision": 0.21739130434782608,
+      "recall": 0.625,
+      "f1": 0.3225806451612903,
+      "accuracy": 0.671875,
+      "trigger_rate": 0.359375,
+      "true_positives": 5,
+      "false_positives": 18,
+      "true_negatives": 38,
+      "false_negatives": 3
+    },
+    {
+      "threshold": 0.12868605256080634,
+      "precision": 0.3076923076923077,
+      "recall": 0.5,
+      "f1": 0.380952380952381,
+      "accuracy": 0.796875,
+      "trigger_rate": 0.203125,
+      "true_positives": 4,
+      "false_positives": 9,
+      "true_negatives": 47,
+      "false_negatives": 4
+    }
+  ],
+  "recommended_threshold_result": {
+    "threshold": 0.076742984354496,
+    "precision": 0.21052631578947367,
+    "recall": 0.5,
+    "f1": 0.2962962962962963,
+    "accuracy": 0.703125,
+    "trigger_rate": 0.296875,
+    "true_positives": 4,
+    "false_positives": 15,
+    "true_negatives": 41,
+    "false_negatives": 4
+  },
+  "best_threshold": {
+    "threshold": 0.12868605256080634,
+    "f1": 0.380952380952381,
+    "precision": 0.3076923076923077,
+    "recall": 0.5,
+    "accuracy": 0.796875,
+    "trigger_rate": 0.203125
+  }
+}
