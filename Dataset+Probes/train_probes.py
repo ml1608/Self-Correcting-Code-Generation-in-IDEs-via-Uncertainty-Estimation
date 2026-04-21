@@ -51,8 +51,6 @@ def get_experiment_config():
     return {
         # Models to train probes for (from MTEmodels notebook)
         "models": [
-            ("llama", "3B-Instruct", "meta-llama/Llama-3.2-3B-Instruct"),
-            ("qwen-coder-instruct", "3B-Instruct", "Qwen/Qwen2.5-Coder-3B-Instruct"),
             ("deepseek", "3B-Instruct", "deepseek-ai/deepseek-coder-1.3b-instruct"),
         ],
         
@@ -820,30 +818,18 @@ def build_dataset_once(tok, model, tasks, cfg, family: str):
         user_prompt = prompt_src
         chat_text = build_chat_text(tok, user_prompt, family=family)
         
-        # 1) Batch sample M completions at once (GPU parallel via num_return_sequences)
-        batch_results = batch_sample_completions(
-            tok, model, chat_text,
-            num_samples=cfg["M_samples"],
-            max_new_tokens=cfg["sample_max_new_tokens"],
-            temperature=cfg["sample_temperature"],
-            top_p=cfg["sample_top_p"],
-        )
-        
-        # Extract code from each sample
-        codes = [extract_code(r["text"]) for r in batch_results]
-        
-        # 2) Run semantic signature checks in parallel (CPU parallel via ThreadPoolExecutor)
-        sig_results = parallel_semantic_signatures(
-            prompt_src, test_src, entry_point, codes,
-            timeout_s=cfg["test_timeout_s"],
-            max_workers=cfg.get("parallel_workers", 5),
-            cluster_method=cfg.get("cluster_method", "trace_hash"),
-        )
-        
-        # Combine results
+        # 1) Sample M completions sequentially (each call is independent for diversity)
         samples = []
-        for r, (sig, ok) in zip(batch_results, sig_results):
-            samples.append({"sig": sig, "ok": ok, "len_norm_logp": r["len_norm_logp"]})
+        for _ in range(cfg["M_samples"]):
+            s = sample_completion_with_len_norm_logp(
+                tok, model, chat_text,
+                max_new_tokens=cfg["sample_max_new_tokens"],
+                temperature=cfg["sample_temperature"],
+                top_p=cfg["sample_top_p"],
+            )
+            code = extract_code(s["text"])
+            sig, ok = semantic_signature(prompt_src, test_src, entry_point, code, timeout_s=cfg["test_timeout_s"])
+            samples.append({"sig": sig, "ok": ok, "len_norm_logp": s["len_norm_logp"]})
         
         # Compute semantic entropy
         p_sample = softmax_probs_from_len_norm_logps([s["len_norm_logp"] for s in samples])
