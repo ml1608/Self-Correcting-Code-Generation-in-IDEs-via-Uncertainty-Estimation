@@ -1,0 +1,191 @@
+[
+  {
+    "model_id": "deepseek-ai/deepseek-coder-1.3b-instruct",
+    "model_family": "deepseek",
+    "feature_method": "TBG",
+    "classifier": "linreg",
+    "threshold": 1.0403,
+    "num_tasks": 5,
+    "timestamp": "2026-04-25T02:24:27.197193",
+    "baseline_results": {
+      "pass": 5,
+      "total": 5,
+      "latencies": [
+        4.972493410110474,
+        2.20228910446167,
+        3.1809232234954834,
+        3.566566228866577,
+        3.397230625152588
+      ],
+      "task_results": [
+        {
+          "task_id": "HumanEval/71",
+          "correct": true,
+          "latency": 4.972493410110474,
+          "code_length": 391
+        },
+        {
+          "task_id": "HumanEval/59",
+          "correct": true,
+          "latency": 2.20228910446167,
+          "code_length": 250
+        },
+        {
+          "task_id": "HumanEval/2",
+          "correct": true,
+          "latency": 3.1809232234954834,
+          "code_length": 319
+        },
+        {
+          "task_id": "HumanEval/143",
+          "correct": true,
+          "latency": 3.566566228866577,
+          "code_length": 479
+        },
+        {
+          "task_id": "HumanEval/159",
+          "correct": true,
+          "latency": 3.397230625152588,
+          "code_length": 314
+        }
+      ],
+      "pass_at_1": 1.0,
+      "avg_latency": 3.4639005184173586
+    },
+    "adaptive_results": {
+      "baseline_pass": 5,
+      "adaptive_pass": 4,
+      "baseline_latencies": [
+        4.972493410110474,
+        2.20228910446167,
+        3.1809232234954834,
+        3.566566228866577,
+        3.397230625152588
+      ],
+      "adaptive_latencies": [
+        12.223209857940674,
+        2.3872365951538086,
+        6.422543287277222,
+        15.571004867553711,
+        22.265260696411133
+      ],
+      "sequence_adaptive_latencies": [
+        11.965729475021362,
+        0.0,
+        6.372249126434326,
+        15.508872985839844,
+        22.211771488189697
+      ],
+      "adaptive_ratio": 0.8,
+      "task_results": [
+        {
+          "task_id": "HumanEval/71",
+          "baseline_correct": true,
+          "adaptive_correct": true,
+          "baseline_latency": 4.972493410110474,
+          "adaptive_latency": 12.223209857940674,
+          "improved": false,
+          "degraded": false
+        },
+        {
+          "task_id": "HumanEval/59",
+          "baseline_correct": true,
+          "adaptive_correct": true,
+          "baseline_latency": 2.20228910446167,
+          "adaptive_latency": 2.3872365951538086,
+          "improved": false,
+          "degraded": false
+        },
+        {
+          "task_id": "HumanEval/2",
+          "baseline_correct": true,
+          "adaptive_correct": true,
+          "baseline_latency": 3.1809232234954834,
+          "adaptive_latency": 6.422543287277222,
+          "improved": false,
+          "degraded": false
+        },
+        {
+          "task_id": "HumanEval/143",
+          "baseline_correct": true,
+          "adaptive_correct": true,
+          "baseline_latency": 3.566566228866577,
+          "adaptive_latency": 15.571004867553711,
+          "improved": false,
+          "degraded": false
+        },
+        {
+          "task_id": "HumanEval/159",
+          "baseline_correct": true,
+          "adaptive_correct": false,
+          "baseline_latency": 3.397230625152588,
+          "adaptive_latency": 22.265260696411133,
+          "improved": false,
+          "degraded": true
+        }
+      ],
+      "impl": "adadec",
+      "baseline_pass_at_1": 1.0,
+      "adaptive_pass_at_1": 0.8,
+      "improvement": -0.19999999999999996,
+      "avg_baseline_latency": 3.4639005184173586,
+      "avg_adaptive_latency": 11.77385106086731,
+      "avg_sequence_adaptive_latency": 11.211724615097046,
+      "num_improved": 0,
+      "num_degraded": 1,
+      "error_bars": {
+        "n_bootstrap": 1000,
+        "ci_level": 0.95,
+        "baseline_pass_at_1_ci": [
+          1.0,
+          1.0
+        ],
+        "adaptive_pass_at_1_ci": [
+          0.4,
+          1.0
+        ],
+        "improvement_ci": [
+          -0.6,
+          0.0
+        ]
+      }
+    },
+    "uncertainty_correction_results": null,
+    "verification_correction_results": null,
+    "comparison": {
+      "summary": {
+        "baseline": {
+          "pass_at_1": 1.0,
+          "avg_latency": 3.4639005184173586
+        },
+        "adaptive": {
+          "pass_at_1": 0.8,
+          "avg_latency": 11.77385106086731,
+          "improvement": -0.19999999999999996
+        }
+      },
+      "method_comparison": [
+        {
+          "method": "Baseline (Greedy)",
+          "pass_at_1": 1.0,
+          "avg_latency": 3.4639005184173586,
+          "improvement": 0.0
+        },
+        {
+          "method": "Adaptive Decoding",
+          "pass_at_1": 0.8,
+          "avg_latency": 11.77385106086731,
+          "improvement": -0.19999999999999996,
+          "tasks_improved": 0,
+          "tasks_degraded": 1
+        }
+      ],
+      "improvements": {
+        "adaptive_vs_baseline": -0.19999999999999996
+      },
+      "latency_comparison": {}
+    },
+    "baseline_time": 17.345380067825317,
+    "adaptive_time": 58.90729260444641
+  }
+]

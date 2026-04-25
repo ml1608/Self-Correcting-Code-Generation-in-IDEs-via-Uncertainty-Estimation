@@ -1,0 +1,324 @@
+[
+  {
+    "model_id": "deepseek-ai/deepseek-coder-1.3b-instruct",
+    "model_family": "deepseek",
+    "feature_method": "SLT",
+    "classifier": "linreg",
+    "threshold": 1.0212,
+    "num_tasks": 5,
+    "timestamp": "2026-04-25T02:45:15.573444",
+    "baseline_results": {
+      "pass": 5,
+      "total": 5,
+      "latencies": [
+        4.869714975357056,
+        2.232208013534546,
+        3.2121026515960693,
+        3.6350228786468506,
+        3.4262983798980713
+      ],
+      "task_results": [
+        {
+          "task_id": "HumanEval/71",
+          "correct": true,
+          "latency": 4.869714975357056,
+          "code_length": 391
+        },
+        {
+          "task_id": "HumanEval/59",
+          "correct": true,
+          "latency": 2.232208013534546,
+          "code_length": 250
+        },
+        {
+          "task_id": "HumanEval/2",
+          "correct": true,
+          "latency": 3.2121026515960693,
+          "code_length": 319
+        },
+        {
+          "task_id": "HumanEval/143",
+          "correct": true,
+          "latency": 3.6350228786468506,
+          "code_length": 479
+        },
+        {
+          "task_id": "HumanEval/159",
+          "correct": true,
+          "latency": 3.4262983798980713,
+          "code_length": 314
+        }
+      ],
+      "pass_at_1": 1.0,
+      "avg_latency": 3.4750693798065186
+    },
+    "adaptive_results": null,
+    "uncertainty_correction_results": {
+      "baseline_pass": 5,
+      "uncertainty_corrected_pass": 5,
+      "baseline_latencies": [
+        4.869714975357056,
+        2.232208013534546,
+        3.2121026515960693,
+        3.6350228786468506,
+        3.4262983798980713
+      ],
+      "uncertainty_corrected_latencies": [
+        22.17353320121765,
+        2.349625587463379,
+        20.29250741004944,
+        24.359514236450195,
+        3.5108625888824463
+      ],
+      "uncertainty_uncertainty_reductions": [
+        0.01648390293121338,
+        0.0,
+        0.0909571647644043,
+        0.0,
+        0.0
+      ],
+      "uncertainty_num_corrections": [
+        5,
+        0,
+        5,
+        5,
+        0
+      ],
+      "uncertainty_task_results": [
+        {
+          "task_id": "HumanEval/71",
+          "baseline_correct": true,
+          "uncertainty_corrected_correct": true,
+          "baseline_latency": 4.869714975357056,
+          "uncertainty_corrected_latency": 22.17353320121765,
+          "uncertainty_initial_uncertainty": 1.8297057151794434,
+          "uncertainty_final_uncertainty": 1.81322181224823,
+          "uncertainty_uncertainty_reduction": 0.01648390293121338,
+          "uncertainty_num_corrections": 5,
+          "improved": false,
+          "degraded": false
+        },
+        {
+          "task_id": "HumanEval/59",
+          "baseline_correct": true,
+          "uncertainty_corrected_correct": true,
+          "baseline_latency": 2.232208013534546,
+          "uncertainty_corrected_latency": 2.349625587463379,
+          "uncertainty_initial_uncertainty": 1.0077781677246094,
+          "uncertainty_final_uncertainty": 1.0077781677246094,
+          "uncertainty_uncertainty_reduction": 0.0,
+          "uncertainty_num_corrections": 0,
+          "improved": false,
+          "degraded": false
+        },
+        {
+          "task_id": "HumanEval/2",
+          "baseline_correct": true,
+          "uncertainty_corrected_correct": true,
+          "baseline_latency": 3.2121026515960693,
+          "uncertainty_corrected_latency": 20.29250741004944,
+          "uncertainty_initial_uncertainty": 2.056715488433838,
+          "uncertainty_final_uncertainty": 1.9657583236694336,
+          "uncertainty_uncertainty_reduction": 0.0909571647644043,
+          "uncertainty_num_corrections": 5,
+          "improved": false,
+          "degraded": false
+        },
+        {
+          "task_id": "HumanEval/143",
+          "baseline_correct": true,
+          "uncertainty_corrected_correct": true,
+          "baseline_latency": 3.6350228786468506,
+          "uncertainty_corrected_latency": 24.359514236450195,
+          "uncertainty_initial_uncertainty": 1.586867332458496,
+          "uncertainty_final_uncertainty": 1.586867332458496,
+          "uncertainty_uncertainty_reduction": 0.0,
+          "uncertainty_num_corrections": 5,
+          "improved": false,
+          "degraded": false
+        },
+        {
+          "task_id": "HumanEval/159",
+          "baseline_correct": true,
+          "uncertainty_corrected_correct": true,
+          "baseline_latency": 3.4262983798980713,
+          "uncertainty_corrected_latency": 3.5108625888824463,
+          "uncertainty_initial_uncertainty": 0.7006549835205078,
+          "uncertainty_final_uncertainty": 0.7006549835205078,
+          "uncertainty_uncertainty_reduction": 0.0,
+          "uncertainty_num_corrections": 0,
+          "improved": false,
+          "degraded": false
+        }
+      ],
+      "baseline_pass_at_1": 1.0,
+      "uncertainty_corrected_pass_at_1": 1.0,
+      "uncertainty_improvement": 0.0,
+      "avg_baseline_latency": 3.4750693798065186,
+      "uncertainty_avg_corrected_latency": 14.537208604812623,
+      "uncertainty_avg_uncertainty_reduction": 0.021488213539123537,
+      "uncertainty_avg_num_corrections": 3.0,
+      "uncertainty_num_improved": 0,
+      "uncertainty_num_degraded": 0
+    },
+    "verification_correction_results": {
+      "baseline_pass": 5,
+      "verification_corrected_pass": 5,
+      "baseline_latencies": [
+        4.869714975357056,
+        2.232208013534546,
+        3.2121026515960693,
+        3.6350228786468506,
+        3.4262983798980713
+      ],
+      "verification_corrected_latencies": [
+        3.002859354019165,
+        2.2895286083221436,
+        3.338412046432495,
+        3.6890408992767334,
+        3.4831061363220215
+      ],
+      "verification_uncertainty_reductions": [],
+      "verification_num_corrections": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "verification_task_results": [
+        {
+          "task_id": "HumanEval/71",
+          "baseline_correct": true,
+          "verification_corrected_correct": true,
+          "baseline_latency": 4.869714975357056,
+          "verification_corrected_latency": 3.002859354019165,
+          "verification_initial_uncertainty": null,
+          "verification_final_uncertainty": null,
+          "verification_uncertainty_reduction": null,
+          "verification_num_corrections": 0,
+          "improved": false,
+          "degraded": false
+        },
+        {
+          "task_id": "HumanEval/59",
+          "baseline_correct": true,
+          "verification_corrected_correct": true,
+          "baseline_latency": 2.232208013534546,
+          "verification_corrected_latency": 2.2895286083221436,
+          "verification_initial_uncertainty": null,
+          "verification_final_uncertainty": null,
+          "verification_uncertainty_reduction": null,
+          "verification_num_corrections": 0,
+          "improved": false,
+          "degraded": false
+        },
+        {
+          "task_id": "HumanEval/2",
+          "baseline_correct": true,
+          "verification_corrected_correct": true,
+          "baseline_latency": 3.2121026515960693,
+          "verification_corrected_latency": 3.338412046432495,
+          "verification_initial_uncertainty": null,
+          "verification_final_uncertainty": null,
+          "verification_uncertainty_reduction": null,
+          "verification_num_corrections": 0,
+          "improved": false,
+          "degraded": false
+        },
+        {
+          "task_id": "HumanEval/143",
+          "baseline_correct": true,
+          "verification_corrected_correct": true,
+          "baseline_latency": 3.6350228786468506,
+          "verification_corrected_latency": 3.6890408992767334,
+          "verification_initial_uncertainty": null,
+          "verification_final_uncertainty": null,
+          "verification_uncertainty_reduction": null,
+          "verification_num_corrections": 0,
+          "improved": false,
+          "degraded": false
+        },
+        {
+          "task_id": "HumanEval/159",
+          "baseline_correct": true,
+          "verification_corrected_correct": true,
+          "baseline_latency": 3.4262983798980713,
+          "verification_corrected_latency": 3.4831061363220215,
+          "verification_initial_uncertainty": null,
+          "verification_final_uncertainty": null,
+          "verification_uncertainty_reduction": null,
+          "verification_num_corrections": 0,
+          "improved": false,
+          "degraded": false
+        }
+      ],
+      "baseline_pass_at_1": 1.0,
+      "verification_corrected_pass_at_1": 1.0,
+      "verification_improvement": 0.0,
+      "avg_baseline_latency": 3.4750693798065186,
+      "verification_avg_corrected_latency": 3.160589408874512,
+      "verification_avg_uncertainty_reduction": null,
+      "verification_avg_num_corrections": 0.0,
+      "verification_num_improved": 0,
+      "verification_num_degraded": 0
+    },
+    "comparison": {
+      "summary": {
+        "baseline": {
+          "pass_at_1": 1.0,
+          "avg_latency": 3.4750693798065186
+        },
+        "uncertainty_self_correction": {
+          "pass_at_1": 1.0,
+          "avg_latency": 14.537208604812623,
+          "improvement": 0.0,
+          "avg_uncertainty_reduction": 0.021488213539123537,
+          "avg_corrections": 3.0
+        },
+        "verification_self_correction": {
+          "pass_at_1": 1.0,
+          "avg_latency": 3.160589408874512,
+          "improvement": 0.0,
+          "avg_corrections": 0.0
+        }
+      },
+      "method_comparison": [
+        {
+          "method": "Baseline (Greedy)",
+          "pass_at_1": 1.0,
+          "avg_latency": 3.4750693798065186,
+          "improvement": 0.0
+        },
+        {
+          "method": "Uncertainty-based Self-Correction",
+          "pass_at_1": 1.0,
+          "avg_latency": 14.537208604812623,
+          "improvement": 0.0,
+          "tasks_improved": 0,
+          "tasks_degraded": 0,
+          "avg_uncertainty_reduction": 0.021488213539123537,
+          "avg_corrections": 3.0
+        },
+        {
+          "method": "Verification-based Self-Correction",
+          "pass_at_1": 1.0,
+          "avg_latency": 3.160589408874512,
+          "improvement": 0.0,
+          "tasks_improved": 0,
+          "tasks_degraded": 0,
+          "avg_corrections": 0.0
+        }
+      ],
+      "improvements": {
+        "uncertainty_correction_vs_baseline": 0.0,
+        "verification_correction_vs_baseline": 0.0,
+        "verification_correction_vs_uncertainty_correction": 0.0
+      },
+      "latency_comparison": {}
+    },
+    "baseline_time": 17.39869475364685,
+    "uncertainty_correction_time": 72.69068884849548,
+    "verification_correction_time": 15.80516529083252
+  }
+]
