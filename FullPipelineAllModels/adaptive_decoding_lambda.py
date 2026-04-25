@@ -130,6 +130,10 @@ def load_sep_probe(
         scaler = probe_data["scaler"]
         clf = probe_data["classifier"]
 
+        # sklearn version patch
+        if not hasattr(clf, "positive"):
+            clf.positive = False
+
         # Get feature method from metadata if available
         if os.path.exists(probe_json_path):
             with open(probe_json_path, "r") as f:
