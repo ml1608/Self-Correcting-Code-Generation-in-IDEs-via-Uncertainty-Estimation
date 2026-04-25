@@ -23,3 +23,12 @@
 | Llama-3.2-3B-Instruct | TBG | -0.0248 | - |
 | Qwen2.5-Coder-3B-Instruct | TBG | -0.0311 | - |
 | deepseek-coder-1.3b-instruct | TBG | 1.0403 | - |
+## Corrected DeepSeek Results (baseline bug fixed)
+
+| Model | Baseline Pass@1 | Adaptive Pass@1 | Improvement |
+|-------|----------------|-----------------|-------------|
+| deepseek-coder-1.3b | 61.3% | 54.8% | -6.5% (not significant) |
+
+**Note:** Previous DeepSeek baseline of 0% was a bug — model was appending
+# Test cases + print() statements which broke test execution. Fixed by
+stripping those lines before evaluation.
