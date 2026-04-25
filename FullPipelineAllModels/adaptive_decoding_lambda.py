@@ -654,6 +654,15 @@ def evaluate_completion(
     if not code:
         return False
 
+    # Strip trailing test/print lines DeepSeek appends after the function
+    lines = code.splitlines()
+    clean = []
+    for line in lines:
+        if line.strip().lower().startswith("# test"):
+            break
+        clean.append(line)
+    code = "\n".join(clean).rstrip()
+
     # Build the solution: prompt_src (complete_prompt) + model output
     solution = prompt_src + "\n" + code
 
