@@ -1,0 +1,25 @@
+{
+  "model_id": "deepseek-ai/deepseek-coder-1.3b-instruct",
+  "model_family": "deepseek",
+  "feature_method": "TBG",
+  "classifier": "linreg",
+  "test_rmse": 0.5443205720744009,
+  "test_r2": -1.805782407527838,
+  "feature_dim": 6144,
+  "layers": [
+    -3,
+    -2,
+    -1
+  ],
+  "n_train": 798,
+  "n_val": 171,
+  "n_test": 171,
+  "semantic_entropy_threshold": 0.4718780846306996,
+  "recommended_threshold": 0.3341665118932724,
+  "M_samples": 5,
+  "label_mode": "median",
+  "dataset_name": "bigcode/bigcodebench",
+  "dataset_split": "v0.1.4",
+  "prompt_field": "complete_prompt",
+  "tbg_extraction": "one_token"
+}

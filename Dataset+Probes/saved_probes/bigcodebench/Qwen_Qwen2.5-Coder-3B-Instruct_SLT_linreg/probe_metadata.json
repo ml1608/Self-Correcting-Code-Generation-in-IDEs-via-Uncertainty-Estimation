@@ -1,0 +1,25 @@
+{
+  "model_id": "Qwen/Qwen2.5-Coder-3B-Instruct",
+  "model_family": "qwen-coder-instruct",
+  "feature_method": "SLT",
+  "classifier": "linreg",
+  "test_rmse": 0.6805363219925631,
+  "test_r2": -4.738689073269626,
+  "feature_dim": 6144,
+  "layers": [
+    -3,
+    -2,
+    -1
+  ],
+  "n_train": 798,
+  "n_val": 171,
+  "n_test": 171,
+  "semantic_entropy_threshold": 0.0,
+  "recommended_threshold": 0.2075996994972229,
+  "M_samples": 5,
+  "label_mode": "median",
+  "dataset_name": "bigcode/bigcodebench",
+  "dataset_split": "v0.1.4",
+  "prompt_field": "complete_prompt",
+  "tbg_extraction": "n/a"
+}
